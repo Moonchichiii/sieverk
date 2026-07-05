@@ -7,24 +7,24 @@ A Rust engine for Swedish SIE accounting files — parser, validator, and
 Bokföringskontroll. Standalone by design: it consumes snapshots and SIE
 files, emits reports, and never touches a production database.
 
-## Status: day zero
+## Status: week-one goal reached
 
-Done: CP437 decoding, byte-authentic synthetic fixtures, CI, one passing
-test suite. Yours: tokenizer → metadata → accounts → vouchers → zero-sum
-validator. The map is `docs/SIE-NOTES.md`; the Django boundary is
-`docs/snapshot-contract.md` (v1.1 FINAL).
+The full chain runs: CP437 decode → tokenizer → metadata → accounts →
+vouchers → validator. 54 tests. The Django boundary is
+`docs/snapshot-contract.md` (v1.1 FINAL); the format map is
+`docs/SIE-NOTES.md`.
 
 ## Run
 
-    cargo test                                # green from minute one
-    cargo run -- fixtures/minimal_valid.se    # CP437 decoding proof
+    cargo test
+    cargo run -- inspect-sie fixtures/minimal_valid.se       # Status: Valid
+    cargo run -- validate-sie fixtures/invalid_unbalanced.se # the verdict
 
-## Week-one finish line
+## Next
 
-`inspect-sie` on the valid fixture prints type/company/year/counts and
-`Status: Valid`; the unbalanced fixture prints `VOUCHER_NOT_BALANCED`
-with a 100.00 difference. No DuckDB, no SolidJS, no Django until after
-the SkogsKvitto launch.
+Nothing, on purpose, until after the SkogsKvitto launch (2026-08-01).
+Then, per plan: snapshot ingestion, reconciliation, SIE-compatible export
+drafts. No DuckDB, no SolidJS, no Django until the engine earns them.
 
 ## House rules
 

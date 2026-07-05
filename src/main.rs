@@ -8,6 +8,7 @@ mod accounts;
 mod metadata;
 mod money;
 mod tokenizer;
+mod validator;
 mod vouchers;
 
 /// SIE files declare `#FORMAT PC8`, which means IBM codepage 437 — a DOS-era
@@ -20,79 +21,176 @@ fn decode_sie_bytes(bytes: Vec<u8>) -> String {
     String::from_cp437(bytes, &CP437_CONTROL)
 }
 
-fn main() -> ExitCode {
-    let Some(path) = env::args().nth(1) else {
-        eprintln!("usage: sieverk <file.se>");
-        return ExitCode::FAILURE;
-    };
+struct Parsed {
+    meta: metadata::Metadata,
+    acc: accounts::AccountData,
+    vou: vouchers::VoucherData,
+    report: validator::Report,
+    tag_lines: usize,
+}
 
-    let bytes = match fs::read(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("could not read {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
+fn load_and_parse(path: &str) -> Result<Parsed, String> {
+    let bytes = fs::read(path).map_err(|e| format!("could not read {path}: {e}"))?;
     let text = decode_sie_bytes(bytes);
     let meta = metadata::parse_metadata(&text);
     let acc = accounts::parse_accounts(&text);
     let vou = vouchers::parse_vouchers(&text);
+    let report = validator::validate(&meta, &acc, &vou);
+    let tag_lines = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .count();
+    Ok(Parsed {
+        meta,
+        acc,
+        vou,
+        report,
+        tag_lines,
+    })
+}
 
+fn main() -> ExitCode {
+    let mut args = env::args().skip(1);
+    // Two subcommands do not justify a parser-generator dependency.
+    // A bare path is treated as inspect-sie, which also keeps the CI
+    // smoke step (`cargo run -- fixtures/...`) working unchanged.
+    let (command, path) = match (args.next(), args.next()) {
+        (Some(cmd), Some(path)) if cmd == "inspect-sie" || cmd == "validate-sie" => (cmd, path),
+        (Some(path), None) => ("inspect-sie".to_string(), path),
+        _ => {
+            eprintln!("usage: sieverk <inspect-sie|validate-sie> <file.se>");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let parsed = match load_and_parse(&path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match command.as_str() {
+        "validate-sie" => run_validate(&path, &parsed),
+        _ => run_inspect(&path, &parsed),
+    }
+}
+
+fn run_inspect(path: &str, p: &Parsed) -> ExitCode {
     fn show(v: &Option<String>) -> &str {
         v.as_deref().unwrap_or("—")
     }
 
-    println!("sieverk — SIE inspection (early build)");
+    println!("sieverk — SIE inspection");
     println!("File:        {path}");
     println!(
         "SIE type:    {}",
-        meta.sie_type.map_or("—".to_string(), |t| t.to_string())
+        p.meta.sie_type.map_or("—".to_string(), |t| t.to_string())
     );
-    println!("Company:     {}", show(&meta.company_name));
-    println!("Org number:  {}", show(&meta.org_number));
-    for fy in &meta.fiscal_years {
+    println!("Company:     {}", show(&p.meta.company_name));
+    println!("Org number:  {}", show(&p.meta.org_number));
+    for fy in &p.meta.fiscal_years {
         println!(
             "Fiscal year: {} – {} (index {})",
             fy.start, fy.end, fy.index
         );
     }
-    println!("Currency:    {}", show(&meta.currency));
-    println!("Accounts:    {}", acc.accounts.len());
-    println!("Balances:    {} rows", acc.balances.len());
-    println!("Vouchers:    {}", vou.vouchers.len());
+    println!("Currency:    {}", show(&p.meta.currency));
+    println!("Accounts:    {}", p.acc.accounts.len());
+    println!("Balances:    {} rows", p.acc.balances.len());
+    println!("Vouchers:    {}", p.vou.vouchers.len());
     println!(
         "Ledger rows: {}",
-        vou.vouchers.iter().map(|v| v.rows.len()).sum::<usize>()
+        p.vou.vouchers.iter().map(|v| v.rows.len()).sum::<usize>()
     );
+    println!("Tag lines:   {}", p.tag_lines);
 
-    let tag_lines = text
-        .lines()
-        .filter(|l| l.trim_start().starts_with('#'))
-        .count();
-    println!("Tag lines:   {tag_lines}");
-
-    let warnings: Vec<&String> = meta
-        .warnings
-        .iter()
-        .chain(acc.warnings.iter())
-        .chain(vou.warnings.iter())
-        .collect();
-    if warnings.is_empty() {
-        println!("Warnings:    none");
-    } else {
-        for w in warnings {
-            println!("Warning:     {w}");
-        }
-    }
+    let parser_warnings = p.meta.warnings.len() + p.acc.warnings.len() + p.vou.warnings.len();
+    println!("Parser notes: {parser_warnings}");
+    println!(
+        "Findings:    {} errors, {} warnings",
+        p.report.error_count(),
+        p.report.warning_count()
+    );
+    println!("Status:      {}", p.report.status());
 
     ExitCode::SUCCESS
+}
+
+fn run_validate(path: &str, p: &Parsed) -> ExitCode {
+    println!("sieverk — SIE validation");
+    println!("File:        {path}");
+
+    for f in &p.report.findings {
+        let sev = match f.severity {
+            validator::Severity::Error => "ERROR  ",
+            validator::Severity::Warning => "WARNING",
+        };
+        println!("{sev} {}: {}", f.code.as_str(), f.message);
+    }
+    for w in p
+        .meta
+        .warnings
+        .iter()
+        .chain(p.acc.warnings.iter())
+        .chain(p.vou.warnings.iter())
+    {
+        println!("PARSER  {w}");
+    }
+
+    println!(
+        "Errors:      {}  Warnings: {}",
+        p.report.error_count(),
+        p.report.warning_count()
+    );
+    println!("Status:      {}", p.report.status());
+
+    if p.report.error_count() > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::decode_sie_bytes;
-    use crate::{accounts, metadata, vouchers};
+    use crate::{accounts, metadata, validator, vouchers};
+
+    /// The week-one finish line, part one: the valid fixture comes out
+    /// of the full pipeline with a clean verdict.
+    #[test]
+    fn fixture_valid_passes_validation() {
+        let bytes = std::fs::read("fixtures/minimal_valid.se")
+            .expect("fixture file should exist — run from the crate root");
+        let text = decode_sie_bytes(bytes);
+        let report = validator::validate(
+            &metadata::parse_metadata(&text),
+            &accounts::parse_accounts(&text),
+            &vouchers::parse_vouchers(&text),
+        );
+        assert!(report.findings.is_empty());
+        assert_eq!(report.status(), validator::Status::Valid);
+    }
+
+    /// The week-one finish line, part two: the broken fixture finally
+    /// hears its verdict — with the exact difference, in öre.
+    #[test]
+    fn fixture_unbalanced_fails_with_exact_difference() {
+        let bytes = std::fs::read("fixtures/invalid_unbalanced.se")
+            .expect("fixture file should exist — run from the crate root");
+        let text = decode_sie_bytes(bytes);
+        let report = validator::validate(
+            &metadata::parse_metadata(&text),
+            &accounts::parse_accounts(&text),
+            &vouchers::parse_vouchers(&text),
+        );
+        assert_eq!(report.error_count(), 1);
+        assert_eq!(report.findings[0].code, validator::Code::VoucherNotBalanced);
+        assert_eq!(report.findings[0].message, "A-1 sums to -100.00");
+        assert_eq!(report.status(), validator::Status::Invalid);
+    }
 
     /// Full pipeline on the real fixture: bytes → CP437 decode →
     /// tokenizer → accounts. Locks the fixture's account inventory and

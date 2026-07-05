@@ -13,9 +13,10 @@ codepage-437 = "0.1"
 # beats a crate whose optional features drag edition-2024 build tooling
 # into the lockfile. f64 remains banned.
 
-# Next deps you'll want, when you get there (not yet — keep it minimal):
-#   thiserror    = "2"   # structured parse errors instead of panics.
-#   clap         = "4"   # subcommands: inspect-sie, validate-sie, ...
+# Next deps, when they earn their place (not yet — keep it minimal):
+#   thiserror = "2"  # structured errors, once error types outgrow String.
+#   clap      = "4"  # benched like rust_decimal: two subcommands do not
+#                    # justify a parser generator. Revisit when flags grow.
 
 [lints.clippy]
 # House rule from day one: no unwrap in parser logic. Tests use .expect(),
