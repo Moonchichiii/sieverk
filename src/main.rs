@@ -8,6 +8,7 @@ mod accounts;
 mod metadata;
 mod money;
 mod tokenizer;
+mod vouchers;
 
 /// SIE files declare `#FORMAT PC8`, which means IBM codepage 437 — a DOS-era
 /// encoding. Reading them as UTF-8 turns å/ä/ö into mojibake, so decoding
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
     let text = decode_sie_bytes(bytes);
     let meta = metadata::parse_metadata(&text);
     let acc = accounts::parse_accounts(&text);
+    let vou = vouchers::parse_vouchers(&text);
 
     fn show(v: &Option<String>) -> &str {
         v.as_deref().unwrap_or("—")
@@ -58,6 +60,11 @@ fn main() -> ExitCode {
     println!("Currency:    {}", show(&meta.currency));
     println!("Accounts:    {}", acc.accounts.len());
     println!("Balances:    {} rows", acc.balances.len());
+    println!("Vouchers:    {}", vou.vouchers.len());
+    println!(
+        "Ledger rows: {}",
+        vou.vouchers.iter().map(|v| v.rows.len()).sum::<usize>()
+    );
 
     let tag_lines = text
         .lines()
@@ -65,7 +72,12 @@ fn main() -> ExitCode {
         .count();
     println!("Tag lines:   {tag_lines}");
 
-    let warnings: Vec<&String> = meta.warnings.iter().chain(acc.warnings.iter()).collect();
+    let warnings: Vec<&String> = meta
+        .warnings
+        .iter()
+        .chain(acc.warnings.iter())
+        .chain(vou.warnings.iter())
+        .collect();
     if warnings.is_empty() {
         println!("Warnings:    none");
     } else {
@@ -80,7 +92,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::decode_sie_bytes;
-    use crate::{accounts, metadata};
+    use crate::{accounts, metadata, vouchers};
 
     /// Full pipeline on the real fixture: bytes → CP437 decode →
     /// tokenizer → accounts. Locks the fixture's account inventory and
@@ -113,6 +125,29 @@ mod tests {
         let expected =
             crate::money::Ore::parse("125000.00").expect("test literal should be a valid amount");
         assert_eq!(opening_1930.amount, expected);
+    }
+
+    /// Full pipeline on the real fixture: bytes → CP437 decode →
+    /// tokenizer → vouchers. Locks both vouchers, all six rows, and one
+    /// exact amount.
+    #[test]
+    fn fixture_vouchers_survive_full_pipeline() {
+        let bytes = std::fs::read("fixtures/minimal_valid.se")
+            .expect("fixture file should exist — run from the crate root");
+        let vou = vouchers::parse_vouchers(&decode_sie_bytes(bytes));
+
+        assert_eq!(vou.vouchers.len(), 2);
+        assert!(vou.warnings.is_empty());
+
+        let first = &vou.vouchers[0];
+        assert_eq!(first.series, "A");
+        assert_eq!(first.text.as_deref(), Some("Diesel skogsmaskin"));
+        assert_eq!(first.rows.len(), 3);
+        let expected =
+            crate::money::Ore::parse("-1250.00").expect("test literal should be a valid amount");
+        assert_eq!(first.rows[0].amount, expected);
+
+        assert_eq!(vou.vouchers[1].rows.len(), 3);
     }
 
     /// Full pipeline on the real fixture: bytes → CP437 decode →
