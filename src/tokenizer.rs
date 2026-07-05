@@ -4,21 +4,12 @@
 //! engine that deals with quotes, escapes and braces; everything after
 //! this works on clean tokens.
 //!
-//! YOUR TASK: implement `tokenize`. The tests at the bottom are the
-//! complete specification — make them green without changing them.
-//!
-//! Hints, in the order you will need them:
-//!   * `line.split_whitespace()` is the trap — it shreds quoted strings.
-//!     You need a character loop: `line.chars()`, probably `.peekable()`.
-//!   * You cannot index a Rust string (`line[0]` will not compile) —
-//!     strings are UTF-8, you walk them with iterators. This is normal;
-//!     embrace `chars()`.
-//!   * Build each token in a `String` buffer with `buf.push(c)`, and take
-//!     it out with `std::mem::take(&mut buf)` when the token ends.
-//!   * Inside quotes: `\"` becomes a literal quote, `\\` a literal
-//!     backslash. Everything else (including spaces) is kept as-is.
-//!   * A small state machine beats a clever one-liner. An
-//!     `enum State { Between, InWord, InQuotes }` is a fine shape.
+//! Implementation: a character-by-character state machine with three
+//! states (Between / InWord / InQuotes). `split_whitespace()` cannot be
+//! used here — it would shred quoted strings like "Diesel skogsmaskin".
+//! Inside quotes, `\"` and `\\` are unescaped. An unterminated quote does
+//! not panic: the rest of the line becomes the token content, because
+//! parsers in this engine never panic on malformed input.
 
 /// One token from a SIE line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +30,71 @@ pub enum Token {
 /// are always their own tokens, even glued to other text (`{}` is two
 /// tokens). An empty or whitespace-only line yields an empty Vec.
 pub fn tokenize(line: &str) -> Vec<Token> {
-    todo!("tokenize {line:?} — the tests below are the spec")
+    enum State {
+        Between,
+        InWord,
+        InQuotes,
+    }
+
+    let mut state = State::Between;
+    let mut buf = String::new();
+    let mut out = Vec::new();
+    let mut chars = line.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match state {
+            State::Between => match c {
+                c if c.is_whitespace() => {}
+                '{' => out.push(Token::BeginList),
+                '}' => out.push(Token::EndList),
+                '"' => state = State::InQuotes,
+                _ => {
+                    buf.push(c);
+                    state = State::InWord;
+                }
+            },
+            State::InWord => match c {
+                c if c.is_whitespace() => {
+                    out.push(Token::Word(std::mem::take(&mut buf)));
+                    state = State::Between;
+                }
+                '{' => {
+                    out.push(Token::Word(std::mem::take(&mut buf)));
+                    out.push(Token::BeginList);
+                    state = State::Between;
+                }
+                '}' => {
+                    out.push(Token::Word(std::mem::take(&mut buf)));
+                    out.push(Token::EndList);
+                    state = State::Between;
+                }
+                _ => buf.push(c),
+            },
+            State::InQuotes => match c {
+                '\\' => match chars.peek() {
+                    Some(&next) if next == '"' || next == '\\' => {
+                        buf.push(next);
+                        chars.next();
+                    }
+                    _ => buf.push('\\'),
+                },
+                '"' => {
+                    out.push(Token::Word(std::mem::take(&mut buf)));
+                    state = State::Between;
+                }
+                _ => buf.push(c),
+            },
+        }
+    }
+
+    // End of line: flush whatever is in flight. An unterminated quote does
+    // not panic — the rest of the line becomes the token content.
+    match state {
+        State::InWord | State::InQuotes => out.push(Token::Word(buf)),
+        State::Between => {}
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -133,5 +188,16 @@ mod tests {
     fn blank_and_whitespace_lines_yield_nothing() {
         assert_eq!(tokenize(""), Vec::<Token>::new());
         assert_eq!(tokenize("   \t "), Vec::<Token>::new());
+    }
+
+    #[test]
+    fn unterminated_quote_does_not_panic() {
+        // Malformed input from a buggy exporter: a quote that never closes.
+        // House rule — parsers never panic. The rest of the line becomes
+        // the token content.
+        assert_eq!(
+            tokenize("#FNAMN \"Aldrig stängd"),
+            vec![w("#FNAMN"), w("Aldrig stängd")]
+        );
     }
 }
