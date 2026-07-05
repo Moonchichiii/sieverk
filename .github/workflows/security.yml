@@ -1,0 +1,24 @@
+name: Security audit
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — advisories don't wait for releases
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/security.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # scheduled runs open an issue when an advisory hits a dependency
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

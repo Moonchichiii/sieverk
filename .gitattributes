@@ -1,0 +1,15 @@
+# Normalize text files to LF in the repo; working copies follow platform.
+* text=auto
+
+# Source and config: LF everywhere, including on Windows checkouts.
+*.rs   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+
+# ── CRITICAL: SIE fixtures are BINARY ────────────────────────────────
+# They are CP437-encoded bytes with CRLF endings — byte-authentic on
+# purpose. If git treated them as text, a Windows checkout with autocrlf
+# would silently rewrite them and every parser test would lie to you.
+*.se  binary
+*.sie binary

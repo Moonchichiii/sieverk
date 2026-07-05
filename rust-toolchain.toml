@@ -1,0 +1,5 @@
+# Pins the toolchain so your machine, CI, and any future contributor
+# build with the same stable Rust. rustup reads this automatically.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,38 @@
+#FLAGGA 0
+#PROGRAM "SIE Studio fixture" 0.1
+#FORMAT PC8
+#GEN 20260705
+#SIETYP 4
+#FNAMN "Demo Skogsbruk AB"
+#ORGNR 999999-9999
+#RAR 0 20260101 20261231
+#RAR -1 20250101 20251231
+#KPTYP EUBAS97
+#VALUTA SEK
+#KONTO 1930 "F”retagskonto"
+#KONTO 2440 "Leverant”rsskulder"
+#KONTO 2611 "Utg†ende moms"
+#KONTO 2641 "Debiterad ing†ende moms"
+#KONTO 3011 "Int„kter virkesf”rs„ljning"
+#KONTO 5611 "Drivmedel"
+#KONTO 6390 "Skogsv†rd och ”vriga kostnader"
+#IB 0 1930 125000.00
+#UB 0 1930 180000.00
+#IB 0 2611 0.00
+#UB 0 2611 -11250.00
+#IB 0 2641 0.00
+#UB 0 2641 250.00
+#RES 0 3011 -45000.00
+#RES 0 5611 1000.00
+#VER A 1 20260312 "Diesel skogsmaskin"
+{
+#TRANS 1930 {} -1250.00
+#TRANS 5611 {} 1000.00
+#TRANS 2641 {} 250.00
+}
+#VER A 2 20260418 "Betalning virkeslikvid"
+{
+#TRANS 1930 {} 56250.00
+#TRANS 3011 {} -45000.00
+#TRANS 2611 {} -11250.00
+}

@@ -1,0 +1,19 @@
+[package]
+name = "sieverk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# SIE files are "PC8" = IBM codepage 437. encoding_rs does NOT cover this
+# (it only implements the WHATWG web encodings), so we use codepage-437.
+codepage-437 = "0.1"
+
+# Next deps you'll want, when you get there (not yet — keep it minimal):
+#   rust_decimal = "1"   # money. Never f64 for accounting amounts.
+#   thiserror    = "2"   # structured parse errors instead of panics.
+#   clap         = "4"   # subcommands: inspect-sie, validate-sie, ...
+
+[lints.clippy]
+# House rule from day one: no unwrap in parser logic. Tests use .expect(),
+# which this lint deliberately does not catch.
+unwrap_used = "warn"

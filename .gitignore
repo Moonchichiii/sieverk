@@ -1,0 +1,43 @@
+# ── Build artifacts ──────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+
+# NOTE: Cargo.lock is COMMITTED on purpose — sieverk is a binary crate,
+# and the lockfile is what makes builds reproducible. Do not add it here.
+
+# ── Secrets & local config — never in git ────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Real accounting data must NEVER be committed ─────────────────────
+# A real SIE file contains a real org.nr, vendor names, and amounts —
+# customer accounting data has no business in git history, ever.
+# Only the synthetic fixtures are whitelisted back in.
+*.se
+*.sie
+!fixtures/*.se
+!fixtures/*.sie
+# Real files used for local testing go here, and only here:
+/local-data/
+
+# ── Analytics databases (later phases) — copies, never source ────────
+*.duckdb
+*.duckdb.wal
+*.db
+
+# ── Engine output (reports, generated exports) — artifacts, not source ─
+/out/
+
+# ── OS junk ──────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Editors ──────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/settings.json
+.idea/
