@@ -4,7 +4,9 @@ use std::process::ExitCode;
 
 use codepage_437::{FromCp437, CP437_CONTROL};
 
+mod accounts;
 mod metadata;
+mod money;
 mod tokenizer;
 
 /// SIE files declare `#FORMAT PC8`, which means IBM codepage 437 — a DOS-era
@@ -33,6 +35,7 @@ fn main() -> ExitCode {
 
     let text = decode_sie_bytes(bytes);
     let meta = metadata::parse_metadata(&text);
+    let acc = accounts::parse_accounts(&text);
 
     fn show(v: &Option<String>) -> &str {
         v.as_deref().unwrap_or("—")
@@ -53,6 +56,8 @@ fn main() -> ExitCode {
         );
     }
     println!("Currency:    {}", show(&meta.currency));
+    println!("Accounts:    {}", acc.accounts.len());
+    println!("Balances:    {} rows", acc.balances.len());
 
     let tag_lines = text
         .lines()
@@ -60,10 +65,11 @@ fn main() -> ExitCode {
         .count();
     println!("Tag lines:   {tag_lines}");
 
-    if meta.warnings.is_empty() {
+    let warnings: Vec<&String> = meta.warnings.iter().chain(acc.warnings.iter()).collect();
+    if warnings.is_empty() {
         println!("Warnings:    none");
     } else {
-        for w in &meta.warnings {
+        for w in warnings {
             println!("Warning:     {w}");
         }
     }
@@ -74,7 +80,40 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::decode_sie_bytes;
-    use crate::metadata;
+    use crate::{accounts, metadata};
+
+    /// Full pipeline on the real fixture: bytes → CP437 decode →
+    /// tokenizer → accounts. Locks the fixture's account inventory and
+    /// one exact Decimal amount, å intact and all.
+    #[test]
+    fn fixture_accounts_survive_full_pipeline() {
+        let bytes = std::fs::read("fixtures/minimal_valid.se")
+            .expect("fixture file should exist — run from the crate root");
+        let acc = accounts::parse_accounts(&decode_sie_bytes(bytes));
+
+        assert_eq!(acc.accounts.len(), 7);
+        assert_eq!(acc.balances.len(), 8);
+        assert!(acc.warnings.is_empty());
+
+        let skogsvard = acc
+            .accounts
+            .iter()
+            .find(|a| a.number == "6390")
+            .expect("account 6390 should exist in the fixture");
+        assert_eq!(
+            skogsvard.name.as_deref(),
+            Some("Skogsvård och övriga kostnader")
+        );
+
+        let opening_1930 = acc
+            .balances
+            .iter()
+            .find(|b| b.kind == accounts::BalanceKind::Opening && b.account == "1930")
+            .expect("opening balance for 1930 should exist");
+        let expected =
+            crate::money::Ore::parse("125000.00").expect("test literal should be a valid amount");
+        assert_eq!(opening_1930.amount, expected);
+    }
 
     /// Full pipeline on the real fixture: bytes → CP437 decode →
     /// tokenizer → metadata. If this is green, the whole chain holds.
