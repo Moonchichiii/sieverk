@@ -28,8 +28,9 @@ pub struct Metadata {
 pub struct FiscalYear {
     /// 0 = current year, -1 = previous, and so on.
     pub index: i32,
-    /// Raw YYYYMMDD as written in the file. Proper date types arrive
-    /// together with voucher parsing.
+    /// Raw YYYYMMDD as written in the file — lexicographic comparison
+    /// works for range checks, so a date type earns its place only once
+    /// date arithmetic does.
     pub start: String,
     pub end: String,
 }
