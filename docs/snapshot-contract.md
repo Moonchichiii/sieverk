@@ -1,4 +1,4 @@
-# SkogsKvitto → Ledger Engine: Snapshot Contract v1.1 (FINAL)
+# SkogsKvitto → Ledger Engine: Snapshot Contract v1.2 (FINAL)
 
 **Status:** accepted. Three amendments from external review (2026-07-05)
 folded in — see §7. Still paper design on the Django side: the snapshot
@@ -59,7 +59,9 @@ and derives the entity view:
 
 Conventions: UTF-8, ISO-8601 dates/timestamps, **all money as strings with
 exactly 2 decimals in SEK** (`"1250.00"`) — never JSON numbers; the Rust side
-parses straight into `rust_decimal`. Empty Django strings (`""`) normalize to
+parses losslessly into `Ore(i64)` (exact integer öre — the engine's money
+type; `rust_decimal` was evaluated and rejected, see Cargo.toml). Empty
+Django strings (`""`) normalize to
 `null` at this boundary. Internal integer PKs are included solely so
 reconciliation reports can point back at specific rows.
 
@@ -230,6 +232,15 @@ to know an event happened and to whom in role terms.
 **The contract is closed.** Anything further follows the version protocol
 below and belongs in the repo's `docs/`, not in another review round.
 
+## 8. Amendment log — v1.1 → v1.2 (documentation-only, money type)
+
+§3 said the Rust side parses money into `rust_decimal`. The engine never did:
+it uses `Ore(i64)` (exact integer öre) throughout, and `rust_decimal` was
+explicitly rejected (edition-2024 lockfile drag — see the Cargo.toml
+comment). The wire format is unchanged — money was always a two-decimal SEK
+string — so `schema_version` stays `"1.0"`; only the prose describing the
+consumer's parse target was wrong. No code changes on either side.
+
 ---
-*v1.1 FINAL, 2026-07-05. Change protocol: bump `schema_version`, engine keeps
+*v1.2 FINAL, 2026-07-10. Change protocol: bump `schema_version`, engine keeps
 parsers for old versions until confirmed unused.*
