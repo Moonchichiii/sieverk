@@ -1,12 +1,18 @@
 [package]
 name = "sieverk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 # SIE files are "PC8" = IBM codepage 437. encoding_rs does NOT cover this
 # (it only implements the WHATWG web encodings), so we use codepage-437.
 codepage-437 = "0.1"
+
+# The snapshot boundary (docs/snapshot-contract.md) is JSON. serde + serde_json
+# earned their place in SV-01: money still crosses as strings and is converted
+# to Ore by our own code (src/snapshot.rs), never by a float-friendly default.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Money is i64 öre (src/money.rs) BY DESIGN, not a shortcut: SIE amounts
 # are öre-resolution, integer arithmetic is exact, and zero dependencies

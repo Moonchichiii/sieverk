@@ -2,40 +2,29 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use codepage_437::{FromCp437, CP437_CONTROL};
-
-mod accounts;
-mod metadata;
-mod money;
-mod tokenizer;
-mod validator;
-mod vouchers;
-
-/// SIE files declare `#FORMAT PC8`, which means IBM codepage 437 — a DOS-era
-/// encoding. Reading them as UTF-8 turns å/ä/ö into mojibake, so decoding
-/// is step zero, before any parsing.
-///
-/// (Real-world caveat: some exporters lie and emit ISO-8859-1 or UTF-8 anyway.
-/// A robust reader eventually sniffs before assuming. Later problem.)
-fn decode_sie_bytes(bytes: Vec<u8>) -> String {
-    String::from_cp437(bytes, &CP437_CONTROL)
-}
+use sieverk::accounts::{parse_accounts, AccountData};
+use sieverk::decode_sie_bytes;
+use sieverk::metadata::{parse_metadata, Metadata};
+use sieverk::money::Ore;
+use sieverk::snapshot::{parse_snapshot, Snapshot};
+use sieverk::validator::{validate, Report, Severity};
+use sieverk::vouchers::{parse_vouchers, VoucherData};
 
 struct Parsed {
-    meta: metadata::Metadata,
-    acc: accounts::AccountData,
-    vou: vouchers::VoucherData,
-    report: validator::Report,
+    meta: Metadata,
+    acc: AccountData,
+    vou: VoucherData,
+    report: Report,
     tag_lines: usize,
 }
 
 fn load_and_parse(path: &str) -> Result<Parsed, String> {
     let bytes = fs::read(path).map_err(|e| format!("could not read {path}: {e}"))?;
     let text = decode_sie_bytes(bytes);
-    let meta = metadata::parse_metadata(&text);
-    let acc = accounts::parse_accounts(&text);
-    let vou = vouchers::parse_vouchers(&text);
-    let report = validator::validate(&meta, &acc, &vou);
+    let meta = parse_metadata(&text);
+    let acc = parse_accounts(&text);
+    let vou = parse_vouchers(&text);
+    let report = validate(&meta, &acc, &vou);
     let tag_lines = text
         .lines()
         .filter(|l| l.trim_start().starts_with('#'))
@@ -51,17 +40,35 @@ fn load_and_parse(path: &str) -> Result<Parsed, String> {
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
-    // Two subcommands do not justify a parser-generator dependency.
+    // Three subcommands still do not justify a parser-generator dependency.
     // A bare path is treated as inspect-sie, which also keeps the CI
     // smoke step (`cargo run -- fixtures/...`) working unchanged.
     let (command, path) = match (args.next(), args.next()) {
-        (Some(cmd), Some(path)) if cmd == "inspect-sie" || cmd == "validate-sie" => (cmd, path),
+        (Some(cmd), Some(path))
+            if cmd == "inspect-sie" || cmd == "validate-sie" || cmd == "inspect-snapshot" =>
+        {
+            (cmd, path)
+        }
         (Some(path), None) => ("inspect-sie".to_string(), path),
         _ => {
             eprintln!("usage: sieverk <inspect-sie|validate-sie> <file.se>");
+            eprintln!("       sieverk inspect-snapshot <snapshot.json>");
             return ExitCode::FAILURE;
         }
     };
+
+    if command == "inspect-snapshot" {
+        return match inspect_snapshot(&path) {
+            Ok(text) => {
+                print!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let parsed = match load_and_parse(&path) {
         Ok(p) => p,
@@ -124,8 +131,8 @@ fn run_validate(path: &str, p: &Parsed) -> ExitCode {
 
     for f in &p.report.findings {
         let sev = match f.severity {
-            validator::Severity::Error => "ERROR  ",
-            validator::Severity::Warning => "WARNING",
+            Severity::Error => "ERROR  ",
+            Severity::Warning => "WARNING",
         };
         println!("{sev} {}: {}", f.code.as_str(), f.message);
     }
@@ -153,10 +160,69 @@ fn run_validate(path: &str, p: &Parsed) -> ExitCode {
     }
 }
 
+/// Reads and validates a snapshot; returns the report text, or the reason it
+/// could not be read. Kept separate from `main` so the CLI is testable
+/// without spawning a process.
+fn inspect_snapshot(path: &str) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let snap = parse_snapshot(&bytes).map_err(|e| format!("{path}: {e}"))?;
+    Ok(render_snapshot(path, &snap))
+}
+
+/// Org numbers are personnummer for enskild firma — never echo them whole.
+fn mask_org_number(org: &str) -> String {
+    let keep = 4;
+    let total = org.chars().count();
+    org.chars()
+        .enumerate()
+        .map(|(i, c)| if i + keep < total { '*' } else { c })
+        .collect()
+}
+
+fn render_snapshot(path: &str, s: &Snapshot) -> String {
+    let receipts_total: Ore = s.receipts.iter().map(|r| r.total_amount).sum();
+    let receipts_vat: Ore = s.receipts.iter().map(|r| r.vat_amount).sum();
+    let income_inc: Ore = s.income_entries.iter().map(|e| e.amount_inc_vat).sum();
+    let org = s
+        .entity
+        .org_number
+        .as_deref()
+        .map_or("—".to_string(), mask_org_number);
+
+    let mut out = String::new();
+    out.push_str("sieverk — snapshot inspection\n");
+    out.push_str(&format!("File:        {path}\n"));
+    out.push_str(&format!("Schema:      {}\n", s.schema_version));
+    out.push_str(&format!(
+        "Entity:      {} (org.nr {org})\n",
+        s.entity.display_name
+    ));
+    out.push_str(&format!("Income year: {}\n", s.income_year));
+    out.push_str(&format!(
+        "Locked:      {}\n",
+        if s.lock.all_properties_locked {
+            "all properties locked"
+        } else {
+            "not all properties locked"
+        }
+    ));
+    out.push_str(&format!("Properties:  {}\n", s.properties.len()));
+    out.push_str(&format!(
+        "Receipts:    {} (total {receipts_total}, vat {receipts_vat})\n",
+        s.receipts.len()
+    ));
+    out.push_str(&format!(
+        "Incomes:     {} (inc {income_inc})\n",
+        s.income_entries.len()
+    ));
+    out.push_str(&format!("Audit chain: {}\n", s.audit_chain.len()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::decode_sie_bytes;
-    use crate::{accounts, metadata, validator, vouchers};
+    use super::{inspect_snapshot, mask_org_number};
+    use sieverk::{accounts, decode_sie_bytes, metadata, validator, vouchers};
 
     /// The week-one finish line, part one: the valid fixture comes out
     /// of the full pipeline with a clean verdict.
@@ -221,7 +287,7 @@ mod tests {
             .find(|b| b.kind == accounts::BalanceKind::Opening && b.account == "1930")
             .expect("opening balance for 1930 should exist");
         let expected =
-            crate::money::Ore::parse("125000.00").expect("test literal should be a valid amount");
+            sieverk::money::Ore::parse("125000.00").expect("test literal should be a valid amount");
         assert_eq!(opening_1930.amount, expected);
     }
 
@@ -242,7 +308,7 @@ mod tests {
         assert_eq!(first.text.as_deref(), Some("Diesel skogsmaskin"));
         assert_eq!(first.rows.len(), 3);
         let expected =
-            crate::money::Ore::parse("-1250.00").expect("test literal should be a valid amount");
+            sieverk::money::Ore::parse("-1250.00").expect("test literal should be a valid amount");
         assert_eq!(first.rows[0].amount, expected);
 
         assert_eq!(vou.vouchers[1].rows.len(), 3);
@@ -286,5 +352,42 @@ mod tests {
 
         // -1000.00 + 900.00 = -100.00: your future validator must catch this.
         assert!(text.contains("Reparation traktor"));
+    }
+
+    // -- inspect-snapshot -------------------------------------------------------
+
+    #[test]
+    fn cli_inspect_snapshot_ok() {
+        let text = inspect_snapshot("fixtures/snapshots/minimal-1.1.json")
+            .expect("valid fixture inspects cleanly");
+        assert!(text.contains("Schema:      1.1"));
+        assert!(text.contains("Income year: 2026"));
+        assert!(text.contains("Receipts:    2 (total 2249.00, vat 450.00)"));
+        assert!(text.contains("Incomes:     1 (inc 56250.00)"));
+    }
+
+    #[test]
+    fn cli_inspect_snapshot_masks_org_number() {
+        let text = inspect_snapshot("fixtures/snapshots/minimal-1.1.json")
+            .expect("valid fixture inspects cleanly");
+        assert!(text.contains("org.nr *******9999"));
+        assert!(!text.contains("999999-9999"));
+        assert_eq!(mask_org_number("999999-9999"), "*******9999");
+        assert_eq!(mask_org_number("12"), "12");
+    }
+
+    #[test]
+    fn cli_inspect_snapshot_reports_invalid_file_with_path() {
+        let e = inspect_snapshot("fixtures/snapshots/invalid-net.json")
+            .expect_err("invalid fixture must not inspect");
+        assert!(e.contains("receipts[0].net_amount"), "{e}");
+        assert!(e.contains("receipt:1001"), "{e}");
+    }
+
+    #[test]
+    fn cli_inspect_snapshot_reports_missing_file() {
+        let e = inspect_snapshot("fixtures/snapshots/does-not-exist.json")
+            .expect_err("missing file is an error");
+        assert!(e.starts_with("could not read"), "{e}");
     }
 }

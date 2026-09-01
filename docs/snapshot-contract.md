@@ -1,8 +1,9 @@
-# SkogsKvitto → Ledger Engine: Snapshot Contract v1.2 (FINAL)
+# SkogsKvitto → Ledger Engine: Snapshot Contract v1.3
 
-**Status:** accepted. Three amendments from external review (2026-07-05)
-folded in — see §7. Still paper design on the Django side: the snapshot
-builder remains a post-August-1 task. This document exists so the Rust
+**Status:** accepted; v1.3 (2026-09-01) adds schema `"1.1"` and supersedes
+rule §5.5 — see §9. The engine reads both `"1.0"` and `"1.1"`
+(`src/snapshot.rs`, SV-01). The Django snapshot builder is SK-05 in
+`SIE-plan-2026-09.md`. This document exists so the Rust
 sidecar and the Django app agree on the boundary *before* either side writes
 integration code.
 
@@ -58,8 +59,10 @@ and derives the entity view:
 ## 3. The JSON shape
 
 Conventions: UTF-8, ISO-8601 dates/timestamps, **all money as strings with
-exactly 2 decimals in SEK** (`"1250.00"`) — never JSON numbers; the Rust side
-parses losslessly into `Ore(i64)` (exact integer öre — the engine's money
+exactly 2 decimals in SEK** (`"1250.00"`) — never JSON numbers, never one or
+three decimals, no thousands separators, no whitespace; the engine rejects
+anything else with the field path (`receipts[3].total_amount`) and parses the
+rest losslessly into `Ore(i64)` (exact integer öre — the engine's money
 type; `rust_decimal` was evaluated and rejected, see Cargo.toml). Empty
 Django strings (`""`) normalize to
 `null` at this boundary. Internal integer PKs are included solely so
@@ -189,7 +192,8 @@ reconciliation reports can point back at specific rows.
    that Django stores (`AccountantReport` with
    `document_type="generated_export"` already fits this).
 5. **Ordinal numbers are source references, never final voucher numbers.**
-   Snapshots aggregate all properties, so `(property A, #17)` and
+   *(Series-per-property below is SUPERSEDED by v1.3 — see §9. Kept for
+   history.)* Snapshots aggregate all properties, so `(property A, #17)` and
    `(property B, #17)` legitimately coexist. For SIE output the engine
    assigns one voucher **series per property** (A, B, C… in stable
    property-creation order), with `ordinal_number` as the number within the
@@ -241,6 +245,54 @@ comment). The wire format is unchanged — money was always a two-decimal SEK
 string — so `schema_version` stays `"1.0"`; only the prose describing the
 consumer's parse target was wrong. No code changes on either side.
 
+## 9. Amendment log — v1.2 → v1.3 (schema `"1.1"`, one series)
+
+Grounded in the read-only code review of 2026-08-31 (`GATE-0-kodkontrakt.md`)
+and the consultant's positions (`SIE-plan-2026-09.md`, D2–D4, D16).
+
+1. **`schema_version` becomes `"1.1"`.** Additive only; the engine keeps the
+   `"1.0"` parser and treats every 1.1-only field as absent (`None`) in 1.0
+   files — never a default that looks filled in. Unknown extra fields are
+   ignored (forward compatibility). Unknown `schema_version` is an error.
+2. **Rule §5.5 superseded: one voucher series.** The consultant's position is
+   that a single series matters most. The property travels as row metadata
+   (`property_id`, which must reference `properties[]`) and, later and only
+   behind a switch, as an optional `#DIM`. Voucher numbers are assigned per
+   export under `voucher_number_strategy ∈ {ENGINE_ASSIGNED,
+   IMPORTER_ASSIGNED}` — **open** until the consultant's real import test
+   shows what the receiving program does with `#VER` numbers. The permanent
+   identity of a row is its source key (`receipt:<pk>` / `income:<pk>`),
+   carried in the export manifest; `SK-<ordinal>` stays the human label.
+3. **New fields (all 1.1):**
+   - `entity.taxonomy_version` (string, e.g. `"1.0"`) and
+     `entity.accounting_profile { vat_registered, bookkeeping_method,
+     default_payment_method, sie_series }` (strings; `unknown` is a legal
+     value that the engine turns into review, never into a guess).
+   - `receipts[].source_key`, `receipts[].payment_method`
+     (`unknown | company_account | private | supplier_credit`), and
+     `receipts[].category_context { requires_business_share, investment_risk,
+     vat_check, sensitive } | null` — the four taxonomy flags that affect an
+     accounting decision, nothing presentational (no `ai_guide`,
+     `review_message`, `export_tab`, `extra_question`).
+   - `income_entries[].source_key`. `income_type` gains the split values
+     (`avverkningsratt`, `leveransvirke`, `grot`, `efterlikvid`, …);
+     `timber_sale` stays valid as legacy and is flagged for manual split.
+   - `entity.operation` keeps its 1.0 name (the plan documents call the same
+     list *business_groups*).
+4. **Two decimals is a hard rule** (§3), not a convention: the snapshot is
+   machine-generated with `quantize(0.01)`, so any other format is drift and is
+   rejected with the field path. The engine also re-checks
+   `net = total − vat − rounding` per receipt and `ex + vat = inc` per income
+   entry, naming the source key in the error.
+5. **Output side is a draft.** The shape of `decisions.json`, `report.json`
+   and `manifest.json` is documented only when the engine and writer exist
+   (SV-03/SV-04); nothing about output is final in this version.
+
+Reference fixtures: `fixtures/snapshots/minimal-1.0.json`,
+`fixtures/snapshots/minimal-1.1.json` (synthetic: 999999-prefixed org.nr,
+fictional names). The Django golden snapshot (SK-05) replaces `minimal-1.1`
+as the reference once it exists.
+
 ---
-*v1.2 FINAL, 2026-07-10. Change protocol: bump `schema_version`, engine keeps
+*v1.3, 2026-09-01. Change protocol unchanged: bump `schema_version`, engine keeps
 parsers for old versions until confirmed unused.*

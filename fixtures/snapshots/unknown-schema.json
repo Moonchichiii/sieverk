@@ -1,0 +1,123 @@
+{
+  "schema_version": "2.0",
+  "generated_at": "2026-08-31T12:00:00+02:00",
+  "source": { "app": "skogskvitto", "environment": "test" },
+
+  "entity": {
+    "owner_id": 42,
+    "display_name": "Kråksjö gård",
+    "org_number": "999999-9999",
+    "operation": ["skog", "mark"],
+    "county": "Kronoberg",
+    "taxonomy_version": "1.0",
+    "accounting_profile": {
+      "vat_registered": "yes",
+      "bookkeeping_method": "cash",
+      "default_payment_method": "company_account",
+      "sie_series": "A"
+    }
+  },
+
+  "income_year": 2026,
+
+  "lock": {
+    "all_properties_locked": false,
+    "declaration_year": 2027
+  },
+
+  "properties": [
+    {
+      "id": 7,
+      "name": "Kråksjö säteri",
+      "slug": "kraksjo-sateri",
+      "is_default": true,
+      "tax_year": { "id": 55, "status": "open", "locked_at": null }
+    }
+  ],
+
+  "receipts": [
+    {
+      "id": 1001,
+      "source_key": "receipt:1001",
+      "property_id": 7,
+      "ordinal_number": 17,
+      "date": "2026-03-12",
+      "vendor": "OKQ8",
+      "entry_type": "expense",
+      "area": "fordon",
+      "category": "Bränsle",
+      "category_context": {
+        "requires_business_share": true,
+        "investment_risk": false,
+        "vat_check": false,
+        "sensitive": true
+      },
+      "payment_method": "company_account",
+      "total_amount": "1250.00",
+      "vat_amount": "250.00",
+      "rounding_amount": "0.00",
+      "net_amount": "1000.00",
+      "note": null,
+      "confirmed_at": "2026-03-12T18:22:11+01:00",
+      "has_image": true
+    },
+    {
+      "id": 1002,
+      "source_key": "receipt:1002",
+      "property_id": 7,
+      "ordinal_number": 18,
+      "date": "2026-07-15",
+      "vendor": "Grusgropen i Kråkbo",
+      "entry_type": "expense",
+      "area": "ovrigt",
+      "category": null,
+      "category_context": null,
+      "payment_method": "unknown",
+      "total_amount": "999.00",
+      "vat_amount": "200.00",
+      "rounding_amount": "-0.20",
+      "net_amount": "799.20",
+      "note": "Faktura avrundad nedåt",
+      "confirmed_at": "2026-07-15T08:05:00+02:00",
+      "has_image": false
+    }
+  ],
+
+  "income_entries": [
+    {
+      "id": 501,
+      "source_key": "income:501",
+      "property_id": 7,
+      "income_type": "timber_sale",
+      "date": "2026-04-18",
+      "buyer_name": "Virkesköparen Golden AB",
+      "description": "Slutavverkning skifte 3",
+      "amount_ex_vat": "45000.00",
+      "vat_amount": "11250.00",
+      "amount_inc_vat": "56250.00",
+      "invoice_number": "A-2231",
+      "payment_date": "2026-05-02",
+      "document_count": 2
+    }
+  ],
+
+  "audit_chain": [
+    {
+      "kind": "event",
+      "event_type": "submitted_to_accountant",
+      "property_id": 7,
+      "occurred_at": "2027-01-15T09:00:00+01:00",
+      "recipient_role": "redovisningskonsult",
+      "note": null
+    },
+    {
+      "kind": "document",
+      "document_type": "accountant_report",
+      "property_id": 7,
+      "received_date": "2027-02-20",
+      "original_filename": "arsbokslut_2026.pdf",
+      "checksum_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "storage_backend": "b2"
+    }
+  ]
+}

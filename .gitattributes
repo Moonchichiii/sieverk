@@ -6,6 +6,7 @@
 *.toml text eol=lf
 *.md   text eol=lf
 *.yml  text eol=lf
+*.json text eol=lf
 
 # ── CRITICAL: SIE fixtures are BINARY ────────────────────────────────
 # They are CP437-encoded bytes with CRLF endings — byte-authentic on
