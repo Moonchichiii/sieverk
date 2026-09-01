@@ -12,7 +12,7 @@ files, emits reports, and never touches a production database.
 Library + thin CLI. The read chain runs: CP437 decode → tokenizer →
 metadata → accounts → vouchers → validator. The Django boundary is read
 too: `src/snapshot.rs` ingests snapshot JSON (schema 1.0 and 1.1) into
-exact `Ore` amounts, or fails with the offending field path. 80 tests.
+exact `Ore` amounts, or fails with the offending field path. 84 tests.
 The boundary is `docs/snapshot-contract.md` (v1.3); the format map is
 `docs/SIE-NOTES.md`.
 

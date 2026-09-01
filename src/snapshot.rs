@@ -150,9 +150,14 @@ pub enum AuditEvent {
     Document {
         document_type: String,
         property_id: i64,
-        received_date: String,
-        original_filename: String,
-        checksum_sha256: String,
+        // Django stores these as nullable/blank (a report may be undated, a legacy
+        // upload may lack a checksum); the snapshot sends null rather than inventing.
+        #[serde(default)]
+        received_date: Option<String>,
+        #[serde(default)]
+        original_filename: Option<String>,
+        #[serde(default)]
+        checksum_sha256: Option<String>,
         storage_backend: String,
     },
 }
@@ -800,5 +805,56 @@ mod tests {
         ] {
             assert!(!is_two_decimal_money(bad), "{bad:?} should fail");
         }
+    }
+
+    // -- document nullability (SV-01b) ------------------------------------------
+
+    #[test]
+    fn parses_document_with_null_optional_fields() {
+        let snap =
+            parse_fixture("document-nulls-1.1.json").expect("nullable document fields parse");
+        match &snap.audit_chain[2] {
+            AuditEvent::Document {
+                received_date,
+                original_filename,
+                checksum_sha256,
+                storage_backend,
+                ..
+            } => {
+                assert!(received_date.is_none());
+                assert!(original_filename.is_none());
+                assert!(checksum_sha256.is_none());
+                assert_eq!(storage_backend, "cloudinary");
+            }
+            other => panic!("expected the undated document third, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn document_with_missing_optional_keys_parses_as_none() {
+        // Keys absent altogether (not just null) are the same contract: None.
+        let bytes = fixture_1_1_with(r#""received_date": "2027-02-20","#, "");
+        let snap = parse_snapshot(&bytes).expect("absent optional key parses");
+        match &snap.audit_chain[1] {
+            AuditEvent::Document { received_date, .. } => assert!(received_date.is_none()),
+            other => panic!("expected a document second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn document_required_fields_stay_required() {
+        let bytes = fixture_1_1_with(r#""storage_backend": "b2""#, r#""storage_backend": null"#);
+        let e = parse_snapshot(&bytes).expect_err("storage_backend is not optional");
+        assert!(e.message.starts_with("invalid snapshot JSON"));
+    }
+
+    #[test]
+    fn document_received_date_rejects_wrong_type() {
+        let bytes = fixture_1_1_with(
+            r#""received_date": "2027-02-20""#,
+            r#""received_date": 20270220"#,
+        );
+        let e = parse_snapshot(&bytes).expect_err("a number is not a date string");
+        assert!(e.message.starts_with("invalid snapshot JSON"));
     }
 }

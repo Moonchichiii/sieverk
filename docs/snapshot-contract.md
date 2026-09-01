@@ -288,11 +288,21 @@ and the consultant's positions (`SIE-plan-2026-09.md`, D2–D4, D16).
    and `manifest.json` is documented only when the engine and writer exist
    (SV-03/SV-04); nothing about output is final in this version.
 
+6. **Document nullability (SV-01b, 2026-09-01).** Inspection of the Django models
+   (`AccountantReport.received_date` nullable, `original_filename` and
+   `checksum_sha256` blank) showed the 1.0 example overpromised: those three
+   `audit_chain[]` document fields are **optional** (`null` or absent).
+   `document_type`, `property_id` and `storage_backend` stay required. The
+   snapshot never invents a date, filename or checksum to satisfy the parser.
+   `audit_chain[].event.recipient_role` stays optional and is `null` until the
+   Django model has an explicit role field (it only stores the recipient's
+   name/e-mail, which never cross this boundary).
+
 Reference fixtures: `fixtures/snapshots/minimal-1.0.json`,
-`fixtures/snapshots/minimal-1.1.json` (synthetic: 999999-prefixed org.nr,
-fictional names). The Django golden snapshot (SK-05) replaces `minimal-1.1`
-as the reference once it exists.
+`fixtures/snapshots/minimal-1.1.json`, `fixtures/snapshots/document-nulls-1.1.json`
+(synthetic: 999999-prefixed org.nr, fictional names). The Django golden snapshot
+(SK-05) replaces `minimal-1.1` as the reference once it exists.
 
 ---
-*v1.3, 2026-09-01. Change protocol unchanged: bump `schema_version`, engine keeps
+*v1.3 (+ §9.6 SV-01b), 2026-09-01. Change protocol unchanged: bump `schema_version`, engine keeps
 parsers for old versions until confirmed unused.*
