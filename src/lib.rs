@@ -16,6 +16,7 @@ pub mod sru;
 pub mod tokenizer;
 pub mod validator;
 pub mod vouchers;
+pub mod workspace;
 
 /// SIE files declare `#FORMAT PC8`, which means IBM codepage 437 — a DOS-era
 /// encoding. Reading them as UTF-8 turns å/ä/ö into mojibake, so decoding
