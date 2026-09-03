@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
 
 use sieverk::accounts::{parse_accounts, AccountData};
 use sieverk::decode_sie_bytes;
 use sieverk::metadata::{parse_metadata, Metadata};
 use sieverk::money::Ore;
+use sieverk::ruleset::load_masterdata;
 use sieverk::snapshot::{parse_snapshot, Snapshot};
 use sieverk::validator::{validate, Report, Severity};
 use sieverk::vouchers::{parse_vouchers, VoucherData};
@@ -39,8 +41,20 @@ fn load_and_parse(path: &str) -> Result<Parsed, String> {
 }
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    // Three subcommands still do not justify a parser-generator dependency.
+    let argv: Vec<String> = env::args().skip(1).collect();
+    // Masterdata takes an explicit root — there is no default root, by
+    // contract (mastermatris v1.2 §D).
+    if argv.first().map(String::as_str) == Some("inspect-masterdata") {
+        return match argv.as_slice() {
+            [_, flag, root] if flag.as_str() == "--root" => inspect_masterdata(Path::new(root)),
+            _ => {
+                eprintln!("usage: sieverk inspect-masterdata --root <generated-dir>");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let mut args = argv.into_iter();
+    // Four subcommands still do not justify a parser-generator dependency.
     // A bare path is treated as inspect-sie, which also keeps the CI
     // smoke step (`cargo run -- fixtures/...`) working unchanged.
     let (command, path) = match (args.next(), args.next()) {
@@ -53,6 +67,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("usage: sieverk <inspect-sie|validate-sie> <file.se>");
             eprintln!("       sieverk inspect-snapshot <snapshot.json>");
+            eprintln!("       sieverk inspect-masterdata --root <generated-dir>");
             return ExitCode::FAILURE;
         }
     };
@@ -217,6 +232,70 @@ fn render_snapshot(path: &str, s: &Snapshot) -> String {
     ));
     out.push_str(&format!("Audit chain: {}\n", s.audit_chain.len()));
     out
+}
+
+fn inspect_masterdata(root: &Path) -> ExitCode {
+    let md = match load_masterdata(root) {
+        Ok(md) => md,
+        Err(e) => {
+            eprintln!("masterdata invalid: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("sieverk — masterdata inspection");
+    println!("Root:          {}", root.display());
+    println!(
+        "Chart:         {} {} ({})",
+        md.chart.chart_id, md.chart.version, md.chart.review_status
+    );
+    println!("Profile:       {}", md.chart.profile_scope);
+    println!(
+        "Workbook:      {} sha256 {}",
+        md.chart.header.workbook, md.chart.header.workbook_sha256
+    );
+    println!(
+        "Accounts:      {} ({} must_include)",
+        md.chart.accounts.len(),
+        md.chart.must_include_numbers().len()
+    );
+    println!(
+        "SRU rows:      {} ({} verified)",
+        md.sru.rows.len(),
+        md.sru.rows.iter().filter(|r| r.verified).count()
+    );
+    println!("VAT rules:     {}", md.vat.rules.len());
+    println!("Counter rules: {}", md.counter.rows.len());
+    println!(
+        "Ruleset:       {} taxonomy {}",
+        md.ruleset.ruleset_version, md.ruleset.taxonomy_version
+    );
+    let automatic = md
+        .ruleset
+        .cases
+        .iter()
+        .filter(|c| c.automation == "Automatic")
+        .count();
+    let downgraded = md
+        .ruleset
+        .cases
+        .iter()
+        .filter(|c| c.downgraded_from_automatic)
+        .count();
+    println!(
+        "Cases:         {} ({} Automatic, {} downgraded to Conditional)",
+        md.ruleset.cases.len(),
+        automatic,
+        downgraded
+    );
+    println!(
+        "Status:        {}",
+        if md.is_draft() {
+            "DRAFT — preliminary output only"
+        } else {
+            "APPROVED"
+        }
+    );
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

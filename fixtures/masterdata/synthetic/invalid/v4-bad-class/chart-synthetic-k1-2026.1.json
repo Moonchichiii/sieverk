@@ -1,0 +1,1216 @@
+{
+  "_header": {
+    "generated": "AUTO-GENERATED — DO NOT EDIT",
+    "generator_version": "mastermatris-gen/1",
+    "profile_scope": "syntetiskt kontraktsfixtur — inte redovisningsmässigt granskat",
+    "review_status": "draft",
+    "taxonomy_version": "1.0",
+    "workbook": "Mastermatris_v1.2-synthetic.xlsx",
+    "workbook_sha256": "35684d165b131e841a999d9da2ef39e2ec966ecc9ffc363de166f94876e1b0ef"
+  },
+  "accounts": [
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Byggnader",
+      "number": "1110",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Mark",
+      "number": "1130",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Markanläggningar",
+      "number": "1150",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Maskiner och inventarier",
+      "number": "1220",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Insatser skogsägarförening",
+      "number": "1364",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Medlemskonto skogsägarförening",
+      "number": "1624",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Momsfordran",
+      "number": "1650",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": false,
+      "must_include_origin": null,
+      "name": "Syntetiskt kassakonto",
+      "number": "1910",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "SYNTHETIC",
+      "source_version": "2026.1"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Bank",
+      "number": "1930",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "tillgång",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Skogskonto",
+      "number": "1973",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "eget_kapital",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Eget kapital",
+      "number": "2010",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "eget_kapital",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Eget uttag",
+      "number": "2013",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "eget_kapital",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Egen insättning",
+      "number": "2017",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "eget_kapital",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Årets resultat",
+      "number": "2019",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": true,
+        "engine_proposable": false,
+        "return_sie_allowed": true,
+        "user_selectable": false
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "skuld",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Långfristiga skulder till kreditinstitut",
+      "number": "2350",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "skuld",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Maskinlån",
+      "number": "2354",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "skuld",
+      "must_include": false,
+      "must_include_origin": null,
+      "name": "Syntetiskt leverantörsskuldkonto",
+      "number": "2440",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "SYNTHETIC",
+      "source_version": "2026.1"
+    },
+    {
+      "kind": "skuld",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Utgående moms",
+      "number": "2610",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "skuld",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Ingående moms",
+      "number": "2640",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "skuld",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Redovisningskonto för moms",
+      "number": "2650",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Skogsinkomster avverkningsrätt",
+      "number": "3410",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Leveransvirke",
+      "number": "3420",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "GROT",
+      "number": "3456",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Efterlikvid skogsägarförening",
+      "number": "3493",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": false,
+      "must_include_origin": null,
+      "name": "Syntetiskt öresutjämningskonto",
+      "number": "3740",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "SYNTHETIC",
+      "source_version": "2026.1"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Hyres- och arrendeintäkter",
+      "number": "3910",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Erhållna bidrag",
+      "number": "3980",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Omkostnader skogen",
+      "number": "4470",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Underhåll ekonomibyggnader",
+      "number": "5171",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Underhåll markanläggningar",
+      "number": "5180",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "El för drift",
+      "number": "5310",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Drivmedel och oljor",
+      "number": "5360",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Förbrukningsinventarier",
+      "number": "5410",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Programvaror",
+      "number": "5420",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Förbrukningsmaterial",
+      "number": "5460",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Arbetskläder/skyddsmaterial",
+      "number": "5480",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Reparation och underhåll av inventarier",
+      "number": "5520",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": false,
+      "must_include_origin": null,
+      "name": "Syntetiskt inaktivt konto",
+      "number": "5999",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": false,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": false,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "SYNTHETIC",
+      "source_version": "2026.1"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Telekommunikation",
+      "number": "6210",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Företagsförsäkringar",
+      "number": "6310",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Bankkostnader",
+      "number": "6570",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Övriga externa kostnader",
+      "number": "6990",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Avskrivningar på byggnader",
+      "number": "7821",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": true,
+        "engine_proposable": false,
+        "return_sie_allowed": true,
+        "user_selectable": false
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Avskrivningar på maskiner/inventarier/anläggningsdjur",
+      "number": "7830",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": true,
+        "engine_proposable": false,
+        "return_sie_allowed": true,
+        "user_selectable": false
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Utdelning på insatser i ekonomiska föreningar",
+      "number": "8240",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "intäkt",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Ränteintäkter från omsättningstillgångar",
+      "number": "8310",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Räntekostnader för långfristiga skulder",
+      "number": "8410",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Räntekostnader för maskinlån",
+      "number": "8414",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": false,
+        "engine_proposable": true,
+        "return_sie_allowed": true,
+        "user_selectable": true
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    },
+    {
+      "kind": "kostnad",
+      "must_include": true,
+      "must_include_origin": "VIBEKE_K1_LIST",
+      "name": "Årets resultat",
+      "number": "8999",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "roles": {
+        "active": true,
+        "business_groups": [],
+        "closing_account": true,
+        "engine_proposable": false,
+        "return_sie_allowed": true,
+        "user_selectable": false
+      },
+      "source_decision": null,
+      "source_id": "VIBEKE_K1_LIST",
+      "source_version": "2026-08-11"
+    }
+  ],
+  "chart_id": "SYNTHETIC_K1",
+  "entity_type": "enskild_firma",
+  "framework": "BAS-struktur (syntetisk)",
+  "profile_scope": "syntetiskt kontraktsfixtur — inte redovisningsmässigt granskat",
+  "review_status": "draft",
+  "schema": "sieverk-chart/1",
+  "sources": {
+    "SYNTHETIC": {
+      "name": "Syntetiska konton",
+      "publisher": "sieverk",
+      "reference": "fixtures/masterdata/synthetic",
+      "retrieved": null,
+      "rights": "synthetic — no third-party rights",
+      "sha256": null,
+      "version": "2026.1"
+    },
+    "VIBEKE_K1_LIST": {
+      "name": "Förslag på enkel kontoplan för skogsägare som bokför enligt K1",
+      "publisher": "Vibeke (redovisningskonsult)",
+      "reference": "PDF 2026-08-11",
+      "retrieved": "2026-08-11",
+      "rights": "author's own list, provided to Valunds",
+      "sha256": null,
+      "version": "2026-08-11"
+    }
+  },
+  "version": "2026.1"
+}

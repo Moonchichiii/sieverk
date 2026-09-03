@@ -1,0 +1,122 @@
+{
+  "_header": {
+    "generated": "AUTO-GENERATED — DO NOT EDIT",
+    "generator_version": "mastermatris-gen/1",
+    "profile_scope": "syntetiskt kontraktsfixtur — inte redovisningsmässigt granskat",
+    "review_status": "draft",
+    "taxonomy_version": "1.0",
+    "workbook": "Mastermatris_v1.2-synthetic.xlsx",
+    "workbook_sha256": "35684d165b131e841a999d9da2ef39e2ec966ecc9ffc363de166f94876e1b0ef"
+  },
+  "examples": [
+    {
+      "case_id": "bransle.default",
+      "expected_findings": [],
+      "expected_lines": [
+        {
+          "account": "5360",
+          "debit": "1000.00"
+        },
+        {
+          "account": "2640",
+          "debit": "250.00"
+        },
+        {
+          "account": "1930",
+          "credit": "1250.00"
+        }
+      ],
+      "expected_status": "Automatic",
+      "id": "ex-bransle-1",
+      "input": {
+        "bookkeeping_method": "cash",
+        "income_type": null,
+        "paid": true,
+        "payment_method": "company_account",
+        "rounding": "0.00",
+        "total": "1250.00",
+        "vat": "250.00",
+        "vat_registered": true
+      },
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      }
+    },
+    {
+      "case_id": "income.leveransvirke.default",
+      "expected_findings": [],
+      "expected_lines": [
+        {
+          "account": "1930",
+          "debit": "125000.00"
+        },
+        {
+          "account": "3420",
+          "credit": "100000.00"
+        },
+        {
+          "account": "2610",
+          "credit": "25000.00"
+        }
+      ],
+      "expected_status": "Automatic",
+      "id": "ex-leveransvirke-1",
+      "input": {
+        "bookkeeping_method": "cash",
+        "income_type": "leveransvirke",
+        "paid": true,
+        "payment_method": null,
+        "rounding": "0.00",
+        "total": "125000.00",
+        "vat": "25000.00",
+        "vat_registered": true
+      },
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      }
+    },
+    {
+      "case_id": "skogsvard.default",
+      "expected_findings": [],
+      "expected_lines": [
+        {
+          "account": "4470",
+          "debit": "25000.00"
+        },
+        {
+          "account": "2640",
+          "debit": "6250.00"
+        },
+        {
+          "account": "1930",
+          "credit": "31250.00"
+        }
+      ],
+      "expected_status": "Automatic",
+      "id": "ex-skogsvard-1",
+      "input": {
+        "bookkeeping_method": "cash",
+        "income_type": null,
+        "paid": true,
+        "payment_method": "company_account",
+        "rounding": "0.00",
+        "total": "31250.00",
+        "vat": "6250.00",
+        "vat_registered": true
+      },
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      }
+    }
+  ],
+  "schema": "sieverk-examples/1"
+}

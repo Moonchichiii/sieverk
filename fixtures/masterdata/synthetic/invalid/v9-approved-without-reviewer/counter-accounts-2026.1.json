@@ -1,0 +1,112 @@
+{
+  "_header": {
+    "generated": "AUTO-GENERATED — DO NOT EDIT",
+    "generator_version": "mastermatris-gen/1",
+    "profile_scope": "syntetiskt kontraktsfixtur — inte redovisningsmässigt granskat",
+    "review_status": "approved",
+    "taxonomy_version": "1.0",
+    "workbook": "Mastermatris_v1.2-synthetic.xlsx",
+    "workbook_sha256": "35684d165b131e841a999d9da2ef39e2ec966ecc9ffc363de166f94876e1b0ef"
+  },
+  "rows": [
+    {
+      "account": "1930",
+      "automation": "Automatic",
+      "bookkeeping_method": null,
+      "key": "betald",
+      "question": null,
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "income"
+    },
+    {
+      "account": null,
+      "automation": "Manual",
+      "bookkeeping_method": "cash",
+      "key": "obetald",
+      "question": "Är inkomsten betald?",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "income"
+    },
+    {
+      "account": "1930",
+      "automation": "Automatic",
+      "bookkeeping_method": null,
+      "key": "company_account",
+      "question": null,
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "receipt"
+    },
+    {
+      "account": "2013",
+      "automation": "Automatic",
+      "bookkeeping_method": null,
+      "key": "private",
+      "question": null,
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "receipt"
+    },
+    {
+      "account": null,
+      "automation": "Manual",
+      "bookkeeping_method": "cash",
+      "key": "supplier_credit",
+      "question": "Är fakturan betald, och i så fall när?",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "receipt"
+    },
+    {
+      "account": "2440",
+      "automation": "Conditional",
+      "bookkeeping_method": "invoice",
+      "key": "supplier_credit",
+      "question": "Bokförs skulden vid fakturadatum?",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "receipt"
+    },
+    {
+      "account": null,
+      "automation": "Manual",
+      "bookkeeping_method": null,
+      "key": "unknown",
+      "question": "Hur betalades kvittot?",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "receipt"
+    }
+  ],
+  "schema": "sieverk-counter/1"
+}

@@ -50,3 +50,32 @@ jobs:
       - run: cargo test --all-targets
       # Smoke test: the real binary against the real fixture, end to end.
       - run: cargo run -- fixtures/minimal_valid.se
+      # Masterdata smoke: the tracked synthetic root must load (SV-02).
+      - run: cargo run -- inspect-masterdata --root fixtures/masterdata/synthetic/generated
+
+  masterdata:
+    name: masterdata (synthetic regeneration is a no-op)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v6
+      # The tracked synthetic artefacts must be exactly what the generator
+      # produces from the tracked workbook (V14). REAL masterdata is never
+      # touched here — it is gitignored and verified locally by Mats.
+      - run: >-
+          uv run --with openpyxl tools/mastermatris_gen.py
+          --root fixtures/masterdata/synthetic
+          --workbook fixtures/masterdata/synthetic/Mastermatris_v1.2-synthetic.xlsx
+          --taxonomy masterdata/taxonomy-1.0.json
+          --k1-list masterdata/vibeke-k1-lista-2026-08-11.json
+          --out fixtures/masterdata/synthetic/generated
+          --draft
+      - run: git diff --exit-code -- fixtures/masterdata/synthetic/generated
+      - run: uv run tools/tests/make_invalid_fixtures.py
+      - run: git diff --exit-code -- fixtures/masterdata/synthetic/invalid
+      # Every tracked broken root must be refused by the real binary.
+      - run: |
+          for root in fixtures/masterdata/synthetic/invalid/*/; do
+            if cargo run --quiet -- inspect-masterdata --root "$root"; then echo "$root loaded but must fail"; exit 1; fi
+          done
+      - run: uv run --with openpyxl --with pytest pytest tools/tests -q

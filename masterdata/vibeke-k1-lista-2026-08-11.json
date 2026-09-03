@@ -1,0 +1,236 @@
+{
+  "schema": "sieverk-k1-list/1",
+  "source": {
+    "name": "Förslag på enkel kontoplan för skogsägare som bokför enligt K1",
+    "author": "Vibeke (redovisningskonsult)",
+    "received": "2026-08-11",
+    "rights": "author's own list, provided to Valunds"
+  },
+  "accounts": [
+    {
+      "number": "1110",
+      "name": "Byggnader",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1130",
+      "name": "Mark",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1150",
+      "name": "Markanläggningar",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1220",
+      "name": "Maskiner och inventarier",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1364",
+      "name": "Insatser skogsägarförening",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1624",
+      "name": "Medlemskonto skogsägarförening",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1930",
+      "name": "Bank",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1650",
+      "name": "Momsfordran",
+      "kind": "tillgång"
+    },
+    {
+      "number": "1973",
+      "name": "Skogskonto",
+      "kind": "tillgång"
+    },
+    {
+      "number": "2010",
+      "name": "Eget kapital",
+      "kind": "eget_kapital"
+    },
+    {
+      "number": "2013",
+      "name": "Eget uttag",
+      "kind": "eget_kapital"
+    },
+    {
+      "number": "2017",
+      "name": "Egen insättning",
+      "kind": "eget_kapital"
+    },
+    {
+      "number": "2019",
+      "name": "Årets resultat",
+      "kind": "eget_kapital"
+    },
+    {
+      "number": "2350",
+      "name": "Långfristiga skulder till kreditinstitut",
+      "kind": "skuld"
+    },
+    {
+      "number": "2354",
+      "name": "Maskinlån",
+      "kind": "skuld"
+    },
+    {
+      "number": "2610",
+      "name": "Utgående moms",
+      "kind": "skuld"
+    },
+    {
+      "number": "2640",
+      "name": "Ingående moms",
+      "kind": "skuld"
+    },
+    {
+      "number": "2650",
+      "name": "Redovisningskonto för moms",
+      "kind": "skuld"
+    },
+    {
+      "number": "3410",
+      "name": "Skogsinkomster avverkningsrätt",
+      "kind": "intäkt"
+    },
+    {
+      "number": "3420",
+      "name": "Leveransvirke",
+      "kind": "intäkt"
+    },
+    {
+      "number": "3456",
+      "name": "GROT",
+      "kind": "intäkt"
+    },
+    {
+      "number": "3493",
+      "name": "Efterlikvid skogsägarförening",
+      "kind": "intäkt"
+    },
+    {
+      "number": "3910",
+      "name": "Hyres- och arrendeintäkter",
+      "kind": "intäkt"
+    },
+    {
+      "number": "3980",
+      "name": "Erhållna bidrag",
+      "kind": "intäkt"
+    },
+    {
+      "number": "4470",
+      "name": "Omkostnader skogen",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5171",
+      "name": "Underhåll ekonomibyggnader",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5180",
+      "name": "Underhåll markanläggningar",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5310",
+      "name": "El för drift",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5360",
+      "name": "Drivmedel och oljor",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5410",
+      "name": "Förbrukningsinventarier",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5420",
+      "name": "Programvaror",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5460",
+      "name": "Förbrukningsmaterial",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5480",
+      "name": "Arbetskläder/skyddsmaterial",
+      "kind": "kostnad"
+    },
+    {
+      "number": "5520",
+      "name": "Reparation och underhåll av inventarier",
+      "kind": "kostnad"
+    },
+    {
+      "number": "6210",
+      "name": "Telekommunikation",
+      "kind": "kostnad"
+    },
+    {
+      "number": "6310",
+      "name": "Företagsförsäkringar",
+      "kind": "kostnad"
+    },
+    {
+      "number": "6570",
+      "name": "Bankkostnader",
+      "kind": "kostnad"
+    },
+    {
+      "number": "6990",
+      "name": "Övriga externa kostnader",
+      "kind": "kostnad"
+    },
+    {
+      "number": "7821",
+      "name": "Avskrivningar på byggnader",
+      "kind": "kostnad"
+    },
+    {
+      "number": "7830",
+      "name": "Avskrivningar på maskiner/inventarier/anläggningsdjur",
+      "kind": "kostnad"
+    },
+    {
+      "number": "8240",
+      "name": "Utdelning på insatser i ekonomiska föreningar",
+      "kind": "intäkt"
+    },
+    {
+      "number": "8310",
+      "name": "Ränteintäkter från omsättningstillgångar",
+      "kind": "intäkt"
+    },
+    {
+      "number": "8410",
+      "name": "Räntekostnader för långfristiga skulder",
+      "kind": "kostnad"
+    },
+    {
+      "number": "8414",
+      "name": "Räntekostnader för maskinlån",
+      "kind": "kostnad"
+    },
+    {
+      "number": "8999",
+      "name": "Årets resultat",
+      "kind": "kostnad"
+    }
+  ]
+}

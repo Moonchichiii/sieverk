@@ -1,0 +1,550 @@
+{
+  "categories": [
+    {
+      "extra_question": "—",
+      "group": "base",
+      "investment_risk": false,
+      "name": "Administration och revisor",
+      "requires_business_share": false,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vad avser köpet/intäkten?",
+      "group": "base",
+      "investment_risk": false,
+      "name": "Annat / osäkert",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket avtal/period gäller arrendet?",
+      "group": "odling",
+      "investment_risk": false,
+      "name": "Arrende",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Vilken avräkning/intäkt hör avverkningen till?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Avverkning",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Vilken betesmark/avtal gäller det?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Bete och mark",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Är detta drift eller en ny markanläggning?",
+      "group": "odling",
+      "investment_risk": true,
+      "name": "Bevattning",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken maskin eller vilket fordon gäller bränslet?",
+      "group": "base",
+      "investment_risk": false,
+      "name": "Bränsle",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Privat eller verksamhet — och reparation eller ny byggnad?",
+      "group": "mark",
+      "investment_risk": true,
+      "name": "Byggnad och underhåll",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Vilket djurslag och vilken köpare gäller försäljningen?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Djurförsäljning",
+      "requires_business_share": false,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Vilket djurslag och vilken motpart gäller köpet?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Djurinköp",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Underhåll eller ny markanläggning?",
+      "group": "mark",
+      "investment_risk": true,
+      "name": "Dränering",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Är detta underhåll eller en ny/förbättrad markanläggning?",
+      "group": "skog",
+      "investment_risk": true,
+      "name": "Dränering och markarbete",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Hur stor andel är verksamhet kontra privat?",
+      "group": "base",
+      "investment_risk": false,
+      "name": "El och drift",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Vilken djurgrupp gäller fodret?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Foder",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Viltvård för verksamheten eller privat jakt?",
+      "group": "mark",
+      "investment_risk": false,
+      "name": "Foder och saltsten",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Gäller försäkringen verksamheten?",
+      "group": "base",
+      "investment_risk": false,
+      "name": "Försäkring",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken gröda och köpare gäller försäljningen?",
+      "group": "odling",
+      "investment_risk": false,
+      "name": "Försäljning av gröda",
+      "requires_business_share": false,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Underhåll eller ny anläggning?",
+      "group": "mark",
+      "investment_risk": true,
+      "name": "Grus och material",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Underhåll av befintlig väg eller ny anläggning?",
+      "group": "skog",
+      "investment_risk": true,
+      "name": "Grus och vägunderhåll",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket fält och vilken gröda gäller gödseln?",
+      "group": "odling",
+      "investment_risk": false,
+      "name": "Gödsel",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Hur hör jakt/viltvården till verksamheten?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Jakt och viltvård",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket avtal/period och jaktlag gäller arrendet?",
+      "group": "mark",
+      "investment_risk": false,
+      "name": "Jaktarrende",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Underhåll eller markförbättring (anläggning)?",
+      "group": "odling",
+      "investment_risk": true,
+      "name": "Jord och kalk",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Drift eller ny/förbättrad markanläggning?",
+      "group": "odling",
+      "investment_risk": true,
+      "name": "Markarbete",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket avtal/period gäller markarrendet?",
+      "group": "mark",
+      "investment_risk": false,
+      "name": "Markarrende",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Mindre förbrukning eller större inköp (inventarie)?",
+      "group": "base",
+      "investment_risk": true,
+      "name": "Maskiner och verktyg",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken djurgrupp gäller medicinen?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Medicin och djurhälsa",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket skifte gäller planteringen?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Plantering",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket skifte/år gäller plantorna?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Plantor",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken maskin gäller servicen?",
+      "group": "base",
+      "investment_risk": false,
+      "name": "Reparation och service",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vad var ändamålet och sträckan (körjournal)?",
+      "group": "base",
+      "investment_risk": false,
+      "name": "Resor och körjournal",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket skifte gäller röjningen — eget arbete eller entreprenör?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Röjning",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Hur hör detta till fastigheten eller verksamheten?",
+      "group": "mark",
+      "investment_risk": true,
+      "name": "Sjö / båt / brygga",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Gäller det underhåll av befintlig väg eller ny/förbättrad anläggning?",
+      "group": "skog",
+      "investment_risk": true,
+      "name": "Skogsbilväg",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket skifte gäller åtgärden?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Skogsvård",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Gäller utrustningen skogsarbetet?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Skyddsutrustning",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken gröda gäller skörden?",
+      "group": "odling",
+      "investment_risk": false,
+      "name": "Skörd",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Är detta reparation eller ny/förbättrad ekonomibyggnad?",
+      "group": "djur",
+      "investment_risk": true,
+      "name": "Stall och byggnader",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Vilket stall gäller det?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Strö och stallmaterial",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Underhåll eller ny stängsling (investering)?",
+      "group": "mark",
+      "investment_risk": true,
+      "name": "Stängsel",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Underhåll eller ny stängsling (investering)?",
+      "group": "djur",
+      "investment_risk": true,
+      "name": "Stängsel och grindar",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Kostnadsföras direkt eller som inventarie/avskrivning?",
+      "group": "base",
+      "investment_risk": true,
+      "name": "Större inköp",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Drift eller investering i tork/lager?",
+      "group": "odling",
+      "investment_risk": true,
+      "name": "Torkning och lagring",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken transport/ändamål (körjournal)?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Transport av djur",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket fält/gröda/säsong gäller utsädet?",
+      "group": "odling",
+      "investment_risk": false,
+      "name": "Utsäde",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken djurgrupp gäller behandlingen?",
+      "group": "djur",
+      "investment_risk": false,
+      "name": "Veterinär",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Hur hör viltvården till verksamheten/arrendet?",
+      "group": "mark",
+      "investment_risk": false,
+      "name": "Viltvård",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilken fastighet och virkesköpare gäller avräkningen?",
+      "group": "skog",
+      "investment_risk": false,
+      "name": "Virkesintäkter",
+      "requires_business_share": false,
+      "sensitive": false,
+      "vat_check": true
+    },
+    {
+      "extra_question": "Underhåll eller ny/förbättrad anläggning?",
+      "group": "mark",
+      "investment_risk": true,
+      "name": "Vägar och markunderhåll",
+      "requires_business_share": true,
+      "sensitive": false,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Vilket fält/gröda gäller växtskyddet?",
+      "group": "odling",
+      "investment_risk": false,
+      "name": "Växtskydd",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    },
+    {
+      "extra_question": "Var sitter kameran och vad är syftet?",
+      "group": "mark",
+      "investment_risk": false,
+      "name": "Åtelkamera och abonnemang",
+      "requires_business_share": true,
+      "sensitive": true,
+      "vat_check": false
+    }
+  ],
+  "income_types": [
+    {
+      "label": "Avverkning / virkesförsäljning",
+      "legacy": true,
+      "value": "timber_sale"
+    },
+    {
+      "label": "Avverkningsrätt (rotpost)",
+      "legacy": false,
+      "value": "avverkningsratt"
+    },
+    {
+      "label": "Leveransvirke",
+      "legacy": false,
+      "value": "leveransvirke"
+    },
+    {
+      "label": "GROT / skogsbränsle",
+      "legacy": false,
+      "value": "grot"
+    },
+    {
+      "label": "Efterlikvid",
+      "legacy": false,
+      "value": "efterlikvid"
+    },
+    {
+      "label": "Övrig skoglig försäljning",
+      "legacy": false,
+      "value": "other_forestry_sale"
+    },
+    {
+      "label": "Jaktarrende",
+      "legacy": false,
+      "value": "hunting_lease"
+    },
+    {
+      "label": "Fiskerätt / fiskekort",
+      "legacy": false,
+      "value": "fishing_right"
+    },
+    {
+      "label": "Arrende / upplåtelse",
+      "legacy": false,
+      "value": "land_lease"
+    },
+    {
+      "label": "Försäljning av gröda / lantbruksprodukter",
+      "legacy": false,
+      "value": "agricultural_sale"
+    },
+    {
+      "label": "Djurförsäljning",
+      "legacy": false,
+      "value": "animal_sale"
+    },
+    {
+      "label": "Bidrag / ersättning",
+      "legacy": false,
+      "value": "grant_compensation"
+    },
+    {
+      "label": "Övrig inkomst",
+      "legacy": false,
+      "value": "other"
+    }
+  ],
+  "payment_methods": [
+    {
+      "label": "Okänt",
+      "value": "unknown"
+    },
+    {
+      "label": "Företagskonto / företagskort",
+      "value": "company_account"
+    },
+    {
+      "label": "Privat utlägg",
+      "value": "private"
+    },
+    {
+      "label": "Leverantörsfaktura, ej betald vid registrering",
+      "value": "supplier_credit"
+    }
+  ],
+  "schema": "skogskvitto-taxonomy-export/1",
+  "taxonomy_version": "1.0"
+}

@@ -7,7 +7,7 @@ A Rust engine for Swedish SIE accounting files — parser, validator, and
 Bokföringskontroll. Standalone by design: it consumes snapshots and SIE
 files, emits reports, and never touches a production database.
 
-## Status: FOUNDATION (SV-01)
+## Status: FOUNDATION (SV-01) + MASTERDATA (SV-02, candidate)
 
 Library + thin CLI. The read chain runs: CP437 decode → tokenizer →
 metadata → accounts → vouchers → validator. The Django boundary is read
@@ -16,8 +16,13 @@ exact `Ore` amounts, or fails with the offending field path. 84 tests.
 The boundary is `docs/snapshot-contract.md` (v1.3); the format map is
 `docs/SIE-NOTES.md`.
 
-No chart of accounts, VAT rules, accounting engine or SIE writer yet —
-those are gated drops in SkogsKvitto's `docs/SIE-plan-2026-09.md`.
+SV-02 (candidate) adds masterdata: `chart.rs`/`sru.rs`/`ruleset.rs` load the
+generated profile chart, SRU table, VAT rules, counter accounts and accounting
+cases from an explicit root and re-run the structural invariants;
+`tools/mastermatris_gen.py` turns a Mastermatris v1.2 workbook into those
+artefacts (draft/approved). See `docs/masterdata.md`. No DuckDB, no engine,
+no SIE writer yet — those are the next gated drops in SkogsKvitto's
+`docs/SIE-plan-2026-09.md`.
 
 ## Run
 
@@ -26,12 +31,15 @@ those are gated drops in SkogsKvitto's `docs/SIE-plan-2026-09.md`.
     cargo run -- validate-sie fixtures/invalid_unbalanced.se            # the verdict
     cargo run -- inspect-snapshot fixtures/snapshots/minimal-1.1.json   # exit 0
     cargo run -- inspect-snapshot fixtures/snapshots/invalid-net.json   # field path, exit 1
+    cargo run -- inspect-masterdata --root fixtures/masterdata/synthetic/generated   # SV-02, exit 0
+    cargo run -- inspect-masterdata --root fixtures/masterdata/synthetic/invalid/v4-duplicate-account   # exit 1
 
 ## Next
 
-In plan order only: masterdata (chart/SRU/ruleset as generated data),
-accounting engine, SIE 4I writer with round-trip through this parser,
-return-SIE reconciliation. Each behind its own gate.
+In plan order only: SV-02D (file-backed DuckDB engine workspace),
+accounting engine (SV-03), SIE 4I writer with round-trip through this
+parser (SV-04), LIVE-E2E-01, return-SIE reconciliation. Each behind its
+own gate.
 
 ## House rules
 

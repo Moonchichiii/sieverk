@@ -1,0 +1,65 @@
+{
+  "_header": {
+    "generated": "AUTO-GENERATED — DO NOT EDIT",
+    "generator_version": "mastermatris-gen/1",
+    "profile_scope": "syntetiskt kontraktsfixtur — inte redovisningsmässigt granskat",
+    "review_status": "draft",
+    "taxonomy_version": "1.0",
+    "workbook": "Mastermatris_v1.2-synthetic.xlsx",
+    "workbook_sha256": "35684d165b131e841a999d9da2ef39e2ec966ecc9ffc363de166f94876e1b0ef"
+  },
+  "rows": [
+    {
+      "account": "3420",
+      "form": "NE",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "SYNTHETIC",
+      "source_version": "2026.1",
+      "sru": "9101",
+      "valid_from": 2026,
+      "valid_to": null,
+      "verified": false,
+      "verified_at": null
+    },
+    {
+      "account": "4470",
+      "form": "NE",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "SYNTHETIC",
+      "source_version": "2026.1",
+      "sru": "9102",
+      "valid_from": 2026,
+      "valid_to": null,
+      "verified": false,
+      "verified_at": null
+    },
+    {
+      "account": "3420",
+      "form": "NE",
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "source": "SYNTHETIC",
+      "source_version": "2026.1",
+      "sru": "9101",
+      "valid_from": 2020,
+      "valid_to": null,
+      "verified": false,
+      "verified_at": null
+    }
+  ],
+  "schema": "sieverk-sru/1"
+}

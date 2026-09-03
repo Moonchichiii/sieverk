@@ -1,0 +1,89 @@
+{
+  "_header": {
+    "generated": "AUTO-GENERATED — DO NOT EDIT",
+    "generator_version": "mastermatris-gen/1",
+    "profile_scope": "syntetiskt kontraktsfixtur — inte redovisningsmässigt granskat",
+    "review_status": "draft",
+    "taxonomy_version": "1.0",
+    "workbook": "Mastermatris_v1.2-synthetic.xlsx",
+    "workbook_sha256": "35684d165b131e841a999d9da2ef39e2ec966ecc9ffc363de166f94876e1b0ef"
+  },
+  "rules": [
+    {
+      "condition": null,
+      "deductibility": "full",
+      "direction": "ingående",
+      "id": "ing12",
+      "manual_review": false,
+      "name": "Ingående moms 12 %",
+      "rates": [
+        "24"
+      ],
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "vat_account": "2640"
+    },
+    {
+      "condition": null,
+      "deductibility": "full",
+      "direction": "ingående",
+      "id": "ing25",
+      "manual_review": false,
+      "name": "Ingående moms 25 %",
+      "rates": [
+        "25"
+      ],
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "vat_account": "2640"
+    },
+    {
+      "condition": "avdragsrätt avgörs av konsult",
+      "deductibility": "manuell",
+      "direction": "ingående",
+      "id": "ing_manuell",
+      "manual_review": true,
+      "name": "Ingående moms, manuell avdragsrätt",
+      "rates": [
+        "25",
+        "12",
+        "6",
+        "0"
+      ],
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "vat_account": "2640"
+    },
+    {
+      "condition": null,
+      "deductibility": "full",
+      "direction": "utgående",
+      "id": "utg25",
+      "manual_review": false,
+      "name": "Utgående moms 25 %",
+      "rates": [
+        "25"
+      ],
+      "review": {
+        "reviewed_at": "2026-09-02",
+        "reviewed_by": "Syntetisk granskare",
+        "reviewed_role": "accounting_reviewer",
+        "status": "Godkänd"
+      },
+      "vat_account": "2610"
+    }
+  ],
+  "schema": "sieverk-vat/1"
+}

@@ -41,3 +41,14 @@ Desktop.ini
 .vscode/*
 !.vscode/settings.json
 .idea/
+
+# ── Masterdata (SV-02, mastermatris v1.2 §D) ─────────────────────────
+# REAL masterdata (the real workbook, BAS source XLS, generated real
+# artefacts) stays local until BAS publication rights are resolved.
+# Only fixtures/masterdata/synthetic/** is tracked. Never stage this root.
+/masterdata/real/
+# Build reports carry wall-clock/git/environment — evidence, not artefacts.
+build-report.txt
+# Python tooling caches (tools/ generator + its tests)
+__pycache__/
+.pytest_cache/

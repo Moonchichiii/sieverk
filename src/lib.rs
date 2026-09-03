@@ -7,9 +7,12 @@
 use codepage_437::{FromCp437, CP437_CONTROL};
 
 pub mod accounts;
+pub mod chart;
 pub mod metadata;
 pub mod money;
+pub mod ruleset;
 pub mod snapshot;
+pub mod sru;
 pub mod tokenizer;
 pub mod validator;
 pub mod vouchers;
