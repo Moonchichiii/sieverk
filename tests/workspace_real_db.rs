@@ -6,7 +6,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use duckdb::Connection;
-use sieverk::workspace::{Workspace, WorkspaceError, SCHEMA_V1_TABLES, WORKSPACE_SCHEMA};
+use serde_json::Value;
+use sieverk::snapshot::parse_snapshot;
+use sieverk::workspace::{
+    canonical_snapshot_bytes, Workspace, WorkspaceError, SCHEMA_V1_TABLES, WORKSPACE_SCHEMA,
+};
 
 /// A unique path under the OS temp dir; removed before use so each test
 /// starts from "no file", and removed again on drop.
@@ -259,4 +263,127 @@ fn two_workspaces_from_nothing_have_identical_container_state() {
         wb.created_by_version().expect("b")
     );
     // Logical row-equivalence is the contract — the two files' bytes need not match.
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 — digest: exactly Django's snapshot_sha256(), hashed by DuckDB
+// ---------------------------------------------------------------------------
+
+fn fixture(name: &str) -> Vec<u8> {
+    fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/snapshots")
+            .join(name),
+    )
+    .expect("fixture exists")
+}
+
+fn django_digests() -> Vec<(String, String)> {
+    let golden: Value =
+        serde_json::from_slice(&fixture("django-digests.json")).expect("golden json");
+    let mut pairs: Vec<(String, String)> = golden["digests"]
+        .as_object()
+        .expect("digests object")
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().expect("hex").to_string()))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+#[test]
+fn duckdb_sha256_matches_the_standard_test_vector() {
+    let db = TempDb::new("sha-vector");
+    let ws = Workspace::create(db.path()).expect("create");
+    assert_eq!(
+        ws.sha256_hex(b"abc").expect("hash"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        ws.sha256_hex(b"").expect("hash"),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+#[test]
+fn snapshot_digest_equals_django_for_every_fixture() {
+    let db = TempDb::new("digest-golden");
+    let ws = Workspace::create(db.path()).expect("create");
+    let pairs = django_digests();
+    assert!(
+        pairs.len() >= 7,
+        "golden must cover the fixtures, got {}",
+        pairs.len()
+    );
+    for (name, django) in &pairs {
+        let rust = ws.snapshot_digest(&fixture(name)).expect(name);
+        assert_eq!(
+            &rust, django,
+            "{name}: Rust/DuckDB digest must equal Django's"
+        );
+    }
+}
+
+#[test]
+fn testgarden_fixture_is_real_schema_1_1_and_parses_typed_separately() {
+    let raw = fixture("testgarden-2026-1.1.json");
+    let snap = parse_snapshot(&raw)
+        .expect("Testgården snapshot parses with the unchanged snapshot module");
+    assert_eq!(snap.schema_version, "1.1");
+    assert_eq!(snap.properties.len(), 2);
+    assert_eq!(snap.receipts.len(), 21);
+    assert_eq!(snap.income_entries.len(), 6);
+    assert_eq!(snap.audit_chain.len(), 0);
+    assert!(!snap.lock.all_properties_locked);
+    let db = TempDb::new("digest-testgarden");
+    let ws = Workspace::create(db.path()).expect("create");
+    let expected = django_digests()
+        .into_iter()
+        .find(|(n, _)| n == "testgarden-2026-1.1.json")
+        .map(|(_, d)| d)
+        .expect("golden has testgarden");
+    assert_eq!(ws.snapshot_digest(&raw).expect("digest"), expected);
+}
+
+#[test]
+fn digest_ignores_top_level_generated_at_but_not_content() {
+    let db = TempDb::new("digest-invariance");
+    let ws = Workspace::create(db.path()).expect("create");
+    let raw = fixture("minimal-1.1.json");
+    let base = ws.snapshot_digest(&raw).expect("digest");
+
+    let mut v: Value = serde_json::from_slice(&raw).expect("json");
+    v["generated_at"] = Value::from("2030-01-01T00:00:00+01:00");
+    let regenerated = serde_json::to_vec_pretty(&v).expect("json");
+    assert_eq!(
+        ws.snapshot_digest(&regenerated).expect("digest"),
+        base,
+        "generated_at is excluded"
+    );
+    // Re-serialising with different whitespace/key order must not matter either.
+    let compact = serde_json::to_vec(&v).expect("json");
+    assert_eq!(ws.snapshot_digest(&compact).expect("digest"), base);
+
+    let mut changed: Value = serde_json::from_slice(&raw).expect("json");
+    changed["receipts"][0]["vat_amount"] = Value::from("249.00");
+    assert_ne!(
+        ws.snapshot_digest(&serde_json::to_vec(&changed).expect("json"))
+            .expect("digest"),
+        base
+    );
+}
+
+#[test]
+fn canonical_bytes_are_compact_sorted_and_utf8() {
+    let raw = r#"{"generated_at":"x","zeta":[1,{"b":"åäö Skogsvård","a":null}],"alpha":"q\"uote"}"#
+        .as_bytes();
+    let canonical = canonical_snapshot_bytes(raw).expect("canonical");
+    assert_eq!(
+        String::from_utf8(canonical).expect("utf8"),
+        r#"{"alpha":"q\"uote","zeta":[1,{"a":null,"b":"åäö Skogsvård"}]}"#
+    );
+    let err = canonical_snapshot_bytes(b"[1,2]").expect_err("array is not a snapshot");
+    assert!(matches!(err, WorkspaceError::Corrupt(_)), "{err}");
+    let err = canonical_snapshot_bytes(b"{ not json").expect_err("garbage");
+    assert!(matches!(err, WorkspaceError::Corrupt(_)), "{err}");
 }

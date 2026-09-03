@@ -5,15 +5,17 @@
 //! from the snapshot and is never synced back. Money is `BIGINT` öre
 //! (`Ore(i64)`), dates are `DATE`, flags are `BOOLEAN` — never VARCHAR.
 //!
-//! This slice is the container contract only: errors, `create`/`open`
-//! state rules and schema v1. Digest, ingestion and readback follow in
-//! their own slices. SV-03's tables (`engine_run_meta`, accounting cases,
+//! Slices so far: the container contract (errors, `create`/`open` state
+//! rules, schema v1) and the snapshot digest (exactly Django's
+//! canonicalisation, hashed by DuckDB's own `sha256`). Ingestion and
+//! readback follow. SV-03's tables (`engine_run_meta`, accounting cases,
 //! decision lines, findings) are not created here.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use duckdb::{params, Connection};
+use serde_json::Value;
 
 /// Schema version stored in the file (`workspace_meta.workspace_schema`).
 /// SV-03 bumps this to 2 when it adds its tables.
@@ -348,10 +350,85 @@ impl Workspace {
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?)
     }
 
+    /// SHA-256 of arbitrary bytes, computed by DuckDB itself
+    /// (`SELECT sha256(?::BLOB)`) — no hand-rolled hash, no extra crate.
+    pub fn sha256_hex(&self, bytes: &[u8]) -> Result<String, WorkspaceError> {
+        Ok(self
+            .conn
+            .query_row("SELECT sha256(?::BLOB)", params![bytes.to_vec()], |r| {
+                r.get(0)
+            })?)
+    }
+
+    /// The snapshot's content digest, contract-identical to Django's
+    /// `snapshot_sha256()`: canonical bytes (see `canonical_snapshot_bytes`)
+    /// hashed by DuckDB. Proven against Django's own digests in
+    /// fixtures/snapshots/django-digests.json.
+    pub fn snapshot_digest(&self, raw_json: &[u8]) -> Result<String, WorkspaceError> {
+        let canonical = canonical_snapshot_bytes(raw_json)?;
+        self.sha256_hex(&canonical)
+    }
+
     /// Close explicitly so a close failure is an error, not a silent drop.
     pub fn close(self) -> Result<(), WorkspaceError> {
         self.conn
             .close()
             .map_err(|(_, e)| WorkspaceError::Duckdb(e.to_string()))
     }
+}
+
+/// Canonical snapshot bytes — exactly what Django hashes:
+/// top-level `generated_at` removed, object keys sorted, compact separators
+/// (`,` and `:`), UTF-8 without ASCII escaping. Key order is enforced here
+/// by sorting (UTF-8 byte order == code point order == Python `sort_keys`),
+/// so it does not depend on serde_json's map implementation. Scalars and
+/// strings are written by serde_json, whose escaping matches Python's
+/// `ensure_ascii=False` output for the snapshot's content (`"`, `\\`, control
+/// characters as `\uXXXX` or the short escapes). The Django golden test is
+/// the proof; any divergence there is a STOP, not a fallback.
+pub fn canonical_snapshot_bytes(raw_json: &[u8]) -> Result<Vec<u8>, WorkspaceError> {
+    let mut value: Value = serde_json::from_slice(raw_json)
+        .map_err(|e| WorkspaceError::Corrupt(format!("snapshot is not valid JSON: {e}")))?;
+    let top = value
+        .as_object_mut()
+        .ok_or_else(|| WorkspaceError::Corrupt("snapshot must be a JSON object".to_string()))?;
+    top.remove("generated_at");
+    let mut out = Vec::with_capacity(raw_json.len());
+    write_canonical(&value, &mut out)?;
+    Ok(out)
+}
+
+fn write_canonical(value: &Value, out: &mut Vec<u8>) -> Result<(), WorkspaceError> {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push(b'{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend(serde_json::to_vec(key).map_err(json_err)?);
+                out.push(b':');
+                write_canonical(&map[key.as_str()], out)?;
+            }
+            out.push(b'}');
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write_canonical(item, out)?;
+            }
+            out.push(b']');
+        }
+        scalar => out.extend(serde_json::to_vec(scalar).map_err(json_err)?),
+    }
+    Ok(())
+}
+
+fn json_err(e: serde_json::Error) -> WorkspaceError {
+    WorkspaceError::Corrupt(format!("cannot serialise canonical JSON: {e}"))
 }

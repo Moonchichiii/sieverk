@@ -1,0 +1,12 @@
+{
+  "_note": "Django snapshot_sha256() (apps/accounting/snapshot.py) run on each fixture: generated_at excluded, sort_keys, separators=(',',':'), ensure_ascii=False, UTF-8, SHA-256. Produced 2026-09-03 on SkogsKvitto f9462bf/d77e9be content; testgarden-2026-1.1.json is accounting_snapshot output for the SK-05B customer under a frozen clock (2026-09-01T12:00 Europe/Stockholm). Rust must reproduce these exactly via DuckDB sha256(BLOB).",
+  "digests": {
+    "document-nulls-1.1.json": "e0787a66575525fe00f10339ab93b3d1937020916d6c9c98ddc541fe66ffe0fe",
+    "invalid-money.json": "2d8c14d4d4389867c2e79d1decae41de60fd96adcc494f1d20ff7c29ee880585",
+    "invalid-net.json": "ef303fbd5f0b111d748614c4a0a1ba6f6326ae64364dab1d1a865acb2c37dd7e",
+    "minimal-1.0.json": "ed30bb097a8044791589e58b5c0d6252a6a06c0b8944072619506a1c917b94d0",
+    "minimal-1.1.json": "db92021326e224ee5d0a3314c9830a77b27d9a946cced6ddc58d8378f3782f4d",
+    "unknown-schema.json": "0fa2814d2538ba9979151e83e41269cbed3cab38c9f024270ed2bb54d61971e6",
+    "testgarden-2026-1.1.json": "5d38739ba786009d1b3ad2d00b69582c8ecb349fcf5be8aa2b16dbb113c9c950"
+  }
+}
