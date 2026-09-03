@@ -38,7 +38,7 @@ writer (SV-04), ingen SkogsKvitto-refactor. Rust-evidens körs av Mats/GitHub, a
 | A1 | `masterdata/Mastermatris_v1.1.xlsx` (skapas nu som `masterdata/real/Mastermatris_v1.2.xlsx`) | **FINNS INTE** i sieverk (repot har `Cargo.*`, `docs/`, `fixtures/`, `src/`, `rust-toolchain.toml`). Arbetsboken har aldrig skapats; Vibeke har inte fyllt något. | SV-02 måste **skapa** arbetsboken med genererade flikar (`Taxonomi`, `Värdelistor`) och förifylld `Konton` — och kan inte nå `Godkänd`-status utan konsult. Se DECISION M3. |
 | A2 | `masterdata/taxonomy-1.0.json` (schema §1) | **FINNS INTE**; exportscriptet `scripts/export_taxonomy.py` finns inte heller i SkogsKvitto. Men SK-01B:s golden `apps/core/tests/golden/taxonomy_v1_0.json` innehåller alla 51 kategorier med de fyra beslutsflaggorna (`requires_business_share`, `investment_risk`, `vat_check`, `sensitive`), grupp och `extra_question`. `income_types` (SK-02) och `payment_methods` (SK-03) finns som modellenum i kod, inte i golden. | Se DECISION M5 (export-script vs konverterad golden). |
 | A3 | `tools/mastermatris_gen.py`, `data/*.json`, `fixtures/masterdata/` | **FINNS INTE** (D17 är beslutat, inte byggt). | Hela SV-02-bygget. |
-| A4 | Vibekes K1-lista (PDF 2026-08-11) | 47 konton, alla följer BAS-klass/siffra (1110…8999). Vilka som är standard-BAS respektive bransch-/fria konton (kandidater: 3410, 3420, 3456, 3493, 4470, 5171, 5180, 8414, 1364, 1624, 2354) avgörs **maskinellt mot BAS 2018 för K1-tabellen**, inte ur minnet — 1973 Skogskonto t.ex. *finns* i BAS. | K1-listan = `must_include`-minimum (D15) och källa för namnen på de nummer som inte finns i K1-tabellen (fria konton). |
+| A4 | Vibekes K1-lista (PDF 2026-08-11) | 45 konton, alla följer BAS-klass/siffra (1110…8999). Vilka som är standard-BAS respektive bransch-/fria konton (kandidater: 3410, 3420, 3456, 3493, 4470, 5171, 5180, 8414, 1364, 1624, 2354) avgörs **maskinellt mot BAS 2018 för K1-tabellen**, inte ur minnet — 1973 Skogskonto t.ex. *finns* i BAS. | K1-listan = `must_include`-minimum (D15) och källa för namnen på de nummer som inte finns i K1-tabellen (fria konton). |
 | A5 | BAS-kontoplaner och villkor | bas.se listar **tre** aktuella kontoplaner, alla gratis PDF/XLS mot nyhetsbrevsanmälan: **BAS 2026** — "för alla typer av företag *utom* de som upprättar förenklat årsbokslut"; **BAS 2018 för K1** — "för enskilda näringsidkare som upprättar förenklat årsbokslut – K1", märkt *Fullständig*; **BAS 2018 för K1 Mini** (ett konto per bokslutsrad). Betald produkt: "BAS-kontoplanen 2026 i JSON-format", 4 000 kr ex moms; villkoren (Mats har läst dem) säger att API-nyckeln gäller tills BAS tillgängliggör nästa maskinläsbara version, att nyttjanderätten till redan erhållen maskinläsbar kontoplan är "i tiden obegränsad" (4.2), att redovisnings-/affärssystem får integrera och vidarelicensiera den genom integrationen (4.3), och att villkoren kan ändras med 30 dagars varsel. Inget lovar gratis 2027-version. Det gäller den **betalda** produkten; den gratis XLS-filens vidaredistribution i ett publikt repo är inte reglerad av dessa villkor. | K1-profilens auktoritativa BAS-bas är **BAS 2018 för K1**, inte BAS 2026 (M1). Inga andra juridiska slutsatser än de uttryckliga villkoren (M2). Köp av 4 000-kr-produkten görs **inte** förrän BAS svarat på K1-frågan. |
 | A6 | "Full lantbrukskontoplan (Ludvig & Co, enskild firma)" (D13) | Branschkontoplan framtagen av LRF Konsult/Ludvig & Co, distribuerad **inuti** bokföringsprogram (Björn Lundén, Edison, Visma: "Lantbruk", "Lantbruk Förenklat årsbokslut"); forum: inte tillgänglig utanför kundrelation. Ingen publik nedladdning, ingen licens. | **INTE CLEARAD för incheckning i sieverk.** Den kan inte vara `Konton`-källa i SV-02. Se DECISION M1. |
 | A7 | SRU/fältkoder | **Rättat i rev 2:** BAS publicerar, utöver INK2–4, två NE-kopplingar, däribland "NE — Inkomst av näringsverksamhet, Enskilda näringsidkare – förenklat årsbokslut, K1-regler" (PDF + XLS) med riktiga fyrsiffriga fältkoder mot BAS-konton (t.ex. 7200→B1, 7210→B2, 7280→B9). Dokumentet anger dock "Konton i BAS Förenklat årsbokslut 2023" — giltighet för deklarationsår 2026 är **inte** verifierad. | `sru-2026.json` får innehålla NE-K1-rader **först när giltigheten för 2026 är verifierad** (källa + datum + sha256 i `sources`); osäker giltighet ⇒ `unresolved`/varning, aldrig `valid_from=2026` för att sidan finns idag. SIE 4I kräver inte `#SRU`; SRU-01 kvarstår för produktionsklar SRU. |
@@ -59,7 +59,7 @@ kan fredagens kedja inte köras utan att bryta V5/V9/V13.
 - **M1 — Chart-källa (rev 2).** K1-profilens auktoritativa BAS-bas = **BAS 2018 för K1**
   (bas.se: "för enskilda näringsidkare som upprättar förenklat årsbokslut – K1", *Fullständig*,
   gratis XLS) — inte BAS 2026, som BAS uttryckligen avgränsar till företag som *inte* upprättar
-  förenklat årsbokslut. Vibekes 47 konton = `must_include` + bransch-/skogsanpassning och källa
+  förenklat årsbokslut. Vibekes 45 konton = `must_include` + bransch-/skogsanpassning och källa
   för hennes kontonamn. **BAS 2026** används enbart som **cross-check** av generella konton/
   förändringar (nya/strukna nummer, namnändringar), aldrig som K1-auktoritet utan källa som
   uttryckligen stödjer det. Ludvig & Co-kontoplanen används inte (A6). Generatorn auditerar
@@ -75,7 +75,7 @@ kan fredagens kedja inte köras utan att bryta V5/V9/V13.
   fortfarande användas som K1-kontoplan?" — 4 000-kr-produkten köps inte före svaret.
 
 - **M2 — Distributionsomfång och provenance (rev 2, M2a behållen som försiktighetsprincip).**
-  `chart-lantbruk-k1-2026.1.json` innehåller **profilens konton** — K1-listans 47 + de konton
+  `chart-lantbruk-k1-2026.1.json` innehåller **profilens konton** — K1-listans 45 + de konton
   ruleset/motkonton/momsregler faktiskt refererar (moms 2610/2640/2650, öresutjämning 3740,
   bank/kassa/eget uttag, bokslutskonton) — typiskt 60–120 rader, aldrig hela BAS-tabellen. Rå
   BAS-XLS (K1 2018 och 2026) och den **riktiga genererade artefakten** ligger under
@@ -235,7 +235,7 @@ NOT TO TOUCH: `src/money.rs`, `src/snapshot.rs`, `src/tokenizer.rs`, `src/metada
 
 ## 5. TESTKONTRAKT (`chart_contract`, ≈ 25 — mäts)
 
-Alla 47 K1-listans konton finns med `must_include=true` **och `must_include_origin=VIBEKE_K1_LIST`**
+Alla 45 K1-listans konton finns med `must_include=true` **och `must_include_origin=VIBEKE_K1_LIST`**
 (inte `source=K1-lista`: standardkonton har `source_id=BAS_2018_K1`, bara nummer som saknas i
 K1-tabellen har `source_id=VIBEKE_K1_LIST`) · varje konto har `source_id` som finns i `sources[]`
 och `source_version` · konto som skiljer sig mellan K1-tabell och 2026-cross-check utan
