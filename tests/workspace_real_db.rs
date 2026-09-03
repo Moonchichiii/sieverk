@@ -9,7 +9,8 @@ use duckdb::Connection;
 use serde_json::Value;
 use sieverk::snapshot::parse_snapshot;
 use sieverk::workspace::{
-    canonical_snapshot_bytes, Workspace, WorkspaceError, SCHEMA_V1_TABLES, WORKSPACE_SCHEMA,
+    canonical_snapshot_bytes, IngestOutcome, Workspace, WorkspaceError, SCHEMA_V1_TABLES,
+    WORKSPACE_SCHEMA,
 };
 
 /// A unique path under the OS temp dir; removed before use so each test
@@ -386,4 +387,445 @@ fn canonical_bytes_are_compact_sorted_and_utf8() {
     assert!(matches!(err, WorkspaceError::Corrupt(_)), "{err}");
     let err = canonical_snapshot_bytes(b"{ not json").expect_err("garbage");
     assert!(matches!(err, WorkspaceError::Corrupt(_)), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3 — ingest: one transaction, Appender per table, rollback on any error
+// ---------------------------------------------------------------------------
+
+const TESTGARDEN: &str = "testgarden-2026-1.1.json";
+const SNAPSHOT_TABLES: [&str; 7] = [
+    "snapshot_meta",
+    "entity_context",
+    "entity_operations",
+    "properties",
+    "receipts",
+    "income_entries",
+    "audit_chain",
+];
+
+fn counts(ws: &Workspace) -> Vec<(String, i64)> {
+    SNAPSHOT_TABLES
+        .iter()
+        .map(|t| ((*t).to_string(), ws.row_count(t).expect("count")))
+        .collect()
+}
+
+fn ingest_testgarden(db: &TempDb) -> Workspace {
+    let mut ws = Workspace::create(db.path()).expect("create");
+    let outcome = ws.ingest(&fixture(TESTGARDEN)).expect("ingest Testgården");
+    assert!(
+        matches!(
+            outcome,
+            IngestOutcome::Ingested {
+                receipts: 21,
+                income_entries: 6,
+                properties: 2,
+                audit_items: 0,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    ws
+}
+
+fn one_i64(ws: &Workspace, sql: &str) -> i64 {
+    ws.connection().query_row(sql, [], |r| r.get(0)).expect(sql)
+}
+
+fn one_string(ws: &Workspace, sql: &str) -> String {
+    ws.connection().query_row(sql, [], |r| r.get(0)).expect(sql)
+}
+
+fn strings(ws: &Workspace, sql: &str) -> Vec<String> {
+    let mut stmt = ws.connection().prepare(sql).expect(sql);
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).expect(sql);
+    rows.map(|r| r.expect("row")).collect()
+}
+
+#[test]
+fn a_testgarden_ingest_survives_close_and_reopen_with_exact_counts() {
+    let db = TempDb::new("ingest-testgarden");
+    let ws = ingest_testgarden(&db);
+    let digest = ws.snapshot_sha256().expect("digest");
+    ws.close().expect("close");
+
+    let ws = Workspace::open(db.path()).expect("reopen");
+    assert_eq!(ws.snapshot_sha256().expect("digest"), digest);
+    assert_eq!(
+        counts(&ws),
+        vec![
+            ("snapshot_meta".to_string(), 1),
+            ("entity_context".to_string(), 1),
+            ("entity_operations".to_string(), 4),
+            ("properties".to_string(), 2),
+            ("receipts".to_string(), 21),
+            ("income_entries".to_string(), 6),
+            ("audit_chain".to_string(), 0),
+        ]
+    );
+    assert_eq!(ws.row_count("workspace_meta").expect("meta"), 1);
+    // The digest stored is Django's (fixtures/snapshots/django-digests.json).
+    let expected = django_digests()
+        .into_iter()
+        .find(|(n, _)| n == TESTGARDEN)
+        .map(|(_, d)| d)
+        .expect("golden");
+    assert_eq!(digest, expected);
+}
+
+#[test]
+fn b_testgarden_exact_values_types_and_order() {
+    let db = TempDb::new("ingest-values");
+    let ws = ingest_testgarden(&db);
+    ws.close().expect("close");
+    let ws = Workspace::open(db.path()).expect("reopen");
+
+    // Större inköp — reservdel till skördare: 60 000,00 / 12 000,00 kr in öre.
+    assert_eq!(
+        one_i64(
+            &ws,
+            "SELECT total_ore FROM receipts WHERE category = 'Större inköp'"
+        ),
+        6_000_000
+    );
+    assert_eq!(
+        one_i64(
+            &ws,
+            "SELECT vat_ore FROM receipts WHERE category = 'Större inköp'"
+        ),
+        1_200_000
+    );
+    // Both rounding signs, in öre.
+    let rounding = strings(
+        &ws,
+        "SELECT CAST(rounding_ore AS VARCHAR) FROM receipts WHERE rounding_ore <> 0 ORDER BY rounding_ore",
+    );
+    assert_eq!(rounding, vec!["-20", "30"]);
+    // Real DATE column, real date value, round-tripped through DuckDB.
+    assert_eq!(
+        one_string(&ws, "SELECT typeof(date) FROM receipts LIMIT 1"),
+        "DATE"
+    );
+    assert_eq!(
+        one_string(
+            &ws,
+            "SELECT CAST(date AS VARCHAR) FROM receipts WHERE vendor = 'Mackens Bensin AB'"
+        ),
+        "2026-08-20"
+    );
+    assert_eq!(
+        one_i64(
+            &ws,
+            "SELECT count(*) FROM income_entries WHERE payment_date IS NULL"
+        ),
+        1,
+        "efterlikvid has no payment_date"
+    );
+    // Order: selector_position preserves the snapshot's vector order exactly.
+    let snap = parse_snapshot(&fixture(TESTGARDEN)).expect("typed parse");
+    let expected_keys: Vec<String> = snap
+        .receipts
+        .iter()
+        .map(|r| r.source_key.clone().expect("1.1 has source keys"))
+        .collect();
+    assert_eq!(
+        strings(
+            &ws,
+            "SELECT source_key FROM receipts ORDER BY selector_position"
+        ),
+        expected_keys
+    );
+    let expected_income: Vec<String> = snap
+        .income_entries
+        .iter()
+        .map(|e| e.source_key.clone().expect("1.1 has source keys"))
+        .collect();
+    assert_eq!(
+        strings(
+            &ws,
+            "SELECT source_key FROM income_entries ORDER BY snapshot_position"
+        ),
+        expected_income
+    );
+    // Ordinals per property: Testgården 1..19, Norrskogen 1..2 — never renumbered.
+    assert_eq!(
+        one_i64(
+            &ws,
+            "SELECT CAST(max(ordinal_number) AS BIGINT) FROM receipts"
+        ),
+        19,
+        "no global 1..21 sequence"
+    );
+    assert_eq!(
+        one_i64(
+            &ws,
+            "SELECT count(DISTINCT property_id) FROM receipts WHERE ordinal_number = 1"
+        ),
+        2
+    );
+}
+
+#[test]
+fn c_downstream_inputs_are_all_in_the_db_no_json_sidechannel() {
+    let db = TempDb::new("ingest-downstream");
+    let raw = fixture(TESTGARDEN);
+    let snap = parse_snapshot(&raw).expect("typed parse");
+    ingest_testgarden(&db).close().expect("close");
+    let ws = Workspace::open(db.path()).expect("reopen");
+
+    let profile = snap
+        .entity
+        .accounting_profile
+        .as_ref()
+        .expect("1.1 profile");
+
+    struct EntityContextRow {
+        display_name: String,
+        org_number: Option<String>,
+        county: Option<String>,
+        taxonomy_version: Option<String>,
+        vat_registered: String,
+        bookkeeping_method: String,
+        default_payment_method: String,
+        sie_series: String,
+    }
+
+    let row = ws
+        .connection()
+        .query_row(
+            "SELECT display_name, org_number, county, taxonomy_version, vat_registered, \
+             bookkeeping_method, default_payment_method, sie_series FROM entity_context",
+            [],
+            |r| {
+                Ok(EntityContextRow {
+                    display_name: r.get(0)?,
+                    org_number: r.get(1)?,
+                    county: r.get(2)?,
+                    taxonomy_version: r.get(3)?,
+                    vat_registered: r.get(4)?,
+                    bookkeeping_method: r.get(5)?,
+                    default_payment_method: r.get(6)?,
+                    sie_series: r.get(7)?,
+                })
+            },
+        )
+        .expect("entity_context");
+
+    assert_eq!(row.display_name, snap.entity.display_name);
+    assert_eq!(row.org_number, snap.entity.org_number);
+    assert_eq!(row.county, snap.entity.county);
+    assert_eq!(row.taxonomy_version, snap.entity.taxonomy_version);
+    assert_eq!(
+        (
+            row.vat_registered,
+            row.bookkeeping_method,
+            row.default_payment_method,
+            row.sie_series,
+        ),
+        (
+            profile.vat_registered.clone(),
+            profile.bookkeeping_method.clone(),
+            profile.default_payment_method.clone(),
+            profile.sie_series.clone(),
+        )
+    );
+
+    let mut ops = strings(
+        &ws,
+        "SELECT operation FROM entity_operations ORDER BY operation",
+    );
+    let mut expected_ops = snap.entity.operation.clone();
+    ops.sort();
+    expected_ops.sort();
+    assert_eq!(ops, expected_ops);
+    assert_eq!(
+        one_i64(
+            &ws,
+            "SELECT CAST(declaration_year AS BIGINT) FROM snapshot_meta"
+        ),
+        i64::from(snap.lock.declaration_year)
+    );
+    assert_eq!(
+        one_string(
+            &ws,
+            "SELECT CAST(all_properties_locked AS VARCHAR) FROM snapshot_meta"
+        ),
+        "false"
+    );
+    // category_context of the first receipt, field for field.
+    let first = &snap.receipts[0];
+    let ctx = first.category_context.as_ref().expect("1.1 has context");
+    let flags: (bool, bool, bool, bool) = ws
+        .connection()
+        .query_row(
+            "SELECT requires_business_share, investment_risk, vat_check, sensitive \
+             FROM receipts WHERE selector_position = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .expect("flags");
+    assert_eq!(
+        flags,
+        (
+            ctx.requires_business_share,
+            ctx.investment_risk,
+            ctx.vat_check,
+            ctx.sensitive
+        )
+    );
+    // Properties carry the tax-year status the lock derives from.
+    assert_eq!(
+        strings(
+            &ws,
+            "SELECT slug || ':' || tax_year_status FROM properties ORDER BY property_id"
+        ),
+        snap.properties
+            .iter()
+            .map(|p| format!("{}:{}", p.slug, p.tax_year.status))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn d_schema_1_0_keeps_missing_context_and_profile_as_null_never_false() {
+    let db = TempDb::new("ingest-1-0");
+    let mut ws = Workspace::create(db.path()).expect("create");
+    let outcome = ws.ingest(&fixture("minimal-1.0.json")).expect("ingest 1.0");
+    assert!(matches!(outcome, IngestOutcome::Ingested { .. }));
+    let total = one_i64(&ws, "SELECT count(*) FROM receipts");
+    assert!(total > 0);
+    for col in [
+        "requires_business_share",
+        "investment_risk",
+        "vat_check",
+        "sensitive",
+    ] {
+        assert_eq!(
+            one_i64(
+                &ws,
+                &format!("SELECT count(*) FROM receipts WHERE {col} IS NULL")
+            ),
+            total,
+            "{col} must be NULL for schema 1.0, never false"
+        );
+    }
+    for col in [
+        "vat_registered",
+        "bookkeeping_method",
+        "default_payment_method",
+        "sie_series",
+    ] {
+        assert_eq!(
+            one_i64(
+                &ws,
+                &format!("SELECT count(*) FROM entity_context WHERE {col} IS NULL")
+            ),
+            1,
+            "{col} must be NULL when the 1.0 snapshot has no accounting_profile"
+        );
+    }
+}
+
+#[test]
+fn e_same_snapshot_twice_is_a_noop() {
+    let db = TempDb::new("ingest-noop");
+    let mut ws = ingest_testgarden(&db);
+    let before = counts(&ws);
+    let digest = ws.snapshot_sha256().expect("digest");
+    let again = ws.ingest(&fixture(TESTGARDEN)).expect("second ingest");
+    assert_eq!(
+        again,
+        IngestOutcome::AlreadyIngested {
+            snapshot_sha256: digest
+        }
+    );
+    assert_eq!(counts(&ws), before);
+}
+
+#[test]
+fn f_another_snapshot_is_refused_and_existing_rows_untouched() {
+    let db = TempDb::new("ingest-mismatch");
+    let mut ws = ingest_testgarden(&db);
+    let before = counts(&ws);
+    let digest = ws.snapshot_sha256().expect("digest");
+    let keys_before = strings(
+        &ws,
+        "SELECT source_key FROM receipts ORDER BY selector_position",
+    );
+    let err = ws
+        .ingest(&fixture("minimal-1.1.json"))
+        .expect_err("must refuse");
+    assert!(
+        matches!(err, WorkspaceError::SnapshotMismatch { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("another snapshot"));
+    assert_eq!(counts(&ws), before);
+    assert_eq!(ws.snapshot_sha256().expect("digest"), digest);
+    assert_eq!(
+        strings(
+            &ws,
+            "SELECT source_key FROM receipts ORDER BY selector_position"
+        ),
+        keys_before
+    );
+}
+
+#[test]
+fn g_real_rollback_on_appender_constraint_error_leaves_zero_snapshot_rows() {
+    let db = TempDb::new("ingest-rollback");
+    // Same snapshot, but two receipts share a source_key: the typed parser
+    // permits it (no uniqueness rule there), the UNIQUE column does not.
+    let mut v: Value = serde_json::from_slice(&fixture(TESTGARDEN)).expect("json");
+    let dup = v["receipts"][0]["source_key"].clone();
+    v["receipts"][1]["source_key"] = dup;
+    let mutated = serde_json::to_vec(&v).expect("json");
+    parse_snapshot(&mutated).expect("typed parse still accepts the duplicate source_key");
+
+    let mut ws = Workspace::create(db.path()).expect("create");
+    let err = ws
+        .ingest(&mutated)
+        .expect_err("UNIQUE(source_key) must fail at append or flush");
+    assert!(matches!(err, WorkspaceError::Duckdb(_)), "{err}");
+    ws.close().expect("close");
+
+    let ws = Workspace::open(db.path()).expect("reopen after rollback");
+    assert_eq!(ws.row_count("workspace_meta").expect("meta"), 1);
+    for table in SNAPSHOT_TABLES {
+        assert_eq!(
+            ws.row_count(table).expect("count"),
+            0,
+            "{table} must be empty after rollback"
+        );
+    }
+    assert!(matches!(
+        ws.snapshot_sha256(),
+        Err(WorkspaceError::NotIngested)
+    ));
+}
+
+#[test]
+fn h_invalid_date_is_refused_before_any_row_is_written() {
+    let db = TempDb::new("ingest-bad-date");
+    let mut v: Value = serde_json::from_slice(&fixture(TESTGARDEN)).expect("json");
+    v["receipts"][3]["date"] = Value::from("2026-13-45");
+    let mutated = serde_json::to_vec(&v).expect("json");
+    parse_snapshot(&mutated).expect("typed parser keeps date as text");
+
+    let mut ws = Workspace::create(db.path()).expect("create");
+    let err = ws.ingest(&mutated).expect_err("must refuse");
+    assert!(
+        matches!(&err, WorkspaceError::InvalidDate { field, value } if field == "receipts[3].date" && value == "2026-13-45"),
+        "{err}"
+    );
+    for table in SNAPSHOT_TABLES {
+        assert_eq!(ws.row_count(table).expect("count"), 0, "{table}");
+    }
+    // A valid ingest afterwards still works — nothing was left half-written.
+    assert!(matches!(
+        ws.ingest(&fixture(TESTGARDEN)),
+        Ok(IngestOutcome::Ingested { .. })
+    ));
 }

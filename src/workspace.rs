@@ -6,16 +6,20 @@
 //! (`Ore(i64)`), dates are `DATE`, flags are `BOOLEAN` — never VARCHAR.
 //!
 //! Slices so far: the container contract (errors, `create`/`open` state
-//! rules, schema v1) and the snapshot digest (exactly Django's
-//! canonicalisation, hashed by DuckDB's own `sha256`). Ingestion and
-//! readback follow. SV-03's tables (`engine_run_meta`, accounting cases,
-//! decision lines, findings) are not created here.
+//! rules, schema v1), the snapshot digest (exactly Django's
+//! canonicalisation, hashed by DuckDB's own `sha256`) and ingestion (one
+//! transaction, one Appender per table, explicit flush, rollback on any
+//! error). Readback follows. SV-03's tables (`engine_run_meta`, accounting
+//! cases, decision lines, findings) are not created here.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use duckdb::{params, Connection};
+use chrono::NaiveDate;
+use duckdb::{params, Connection, Transaction};
 use serde_json::Value;
+
+use crate::snapshot::{parse_snapshot, AuditEvent, Snapshot};
 
 /// Schema version stored in the file (`workspace_meta.workspace_schema`).
 /// SV-03 bumps this to 2 when it adds its tables.
@@ -35,6 +39,12 @@ pub enum WorkspaceError {
     Corrupt(String),
     /// A read that needs an ingested snapshot was attempted on an empty workspace.
     NotIngested,
+    /// The workspace already holds a different snapshot — never overwritten.
+    SnapshotMismatch { existing: String, incoming: String },
+    /// The typed snapshot parser (unchanged `snapshot.rs`) refused the input.
+    Snapshot(String),
+    /// A date field is not `YYYY-MM-DD`; DATE columns never get a VARCHAR fallback.
+    InvalidDate { field: String, value: String },
     /// Anything DuckDB itself refused.
     Duckdb(String),
 }
@@ -54,6 +64,14 @@ impl fmt::Display for WorkspaceError {
             ),
             Self::Corrupt(why) => write!(f, "workspace is corrupt: {why}"),
             Self::NotIngested => write!(f, "workspace has no ingested snapshot"),
+            Self::SnapshotMismatch { existing, incoming } => write!(
+                f,
+                "workspace belongs to another snapshot ({existing}); refusing {incoming}"
+            ),
+            Self::Snapshot(e) => write!(f, "snapshot rejected: {e}"),
+            Self::InvalidDate { field, value } => {
+                write!(f, "{field}: {value:?} is not a YYYY-MM-DD date")
+            }
             Self::Duckdb(e) => write!(f, "duckdb: {e}"),
         }
     }
@@ -65,6 +83,22 @@ impl From<duckdb::Error> for WorkspaceError {
     fn from(e: duckdb::Error) -> Self {
         Self::Duckdb(e.to_string())
     }
+}
+
+/// Result of `Workspace::ingest`. The same snapshot twice is a no-op, not an
+/// error; a different snapshot is `WorkspaceError::SnapshotMismatch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestOutcome {
+    Ingested {
+        snapshot_sha256: String,
+        properties: usize,
+        receipts: usize,
+        income_entries: usize,
+        audit_items: usize,
+    },
+    AlreadyIngested {
+        snapshot_sha256: String,
+    },
 }
 
 /// Schema v1 — exactly the snapshot's content, typed. Column order and
@@ -369,12 +403,282 @@ impl Workspace {
         self.sha256_hex(&canonical)
     }
 
+    /// Ingest one snapshot into an empty workspace.
+    ///
+    /// Digest first (DuckDB `sha256`, Django's canonicalisation), then the
+    /// state rule: 0 rows ⇒ ingest; same digest ⇒ `AlreadyIngested`;
+    /// another digest ⇒ `SnapshotMismatch` — existing rows are never touched.
+    /// Typed parse goes through the unchanged `snapshot::parse_snapshot`; every
+    /// DATE is parsed before the transaction opens so an invalid date can
+    /// never leave partial rows. Then exactly one transaction: one Appender
+    /// per table, explicit `flush()`, commit only after every appender
+    /// succeeded; any append or flush error rolls everything back.
+    pub fn ingest(&mut self, raw_json: &[u8]) -> Result<IngestOutcome, WorkspaceError> {
+        let digest = self.snapshot_digest(raw_json)?;
+        match self.snapshot_count()? {
+            0 => {}
+            1 => {
+                let existing = self.snapshot_sha256()?;
+                if existing == digest {
+                    return Ok(IngestOutcome::AlreadyIngested {
+                        snapshot_sha256: digest,
+                    });
+                }
+                return Err(WorkspaceError::SnapshotMismatch {
+                    existing,
+                    incoming: digest,
+                });
+            }
+            n => {
+                return Err(WorkspaceError::Corrupt(format!(
+                    "snapshot_meta must have 0 or 1 rows, found {n}"
+                )))
+            }
+        }
+        let snapshot =
+            parse_snapshot(raw_json).map_err(|e| WorkspaceError::Snapshot(e.to_string()))?;
+        let dates = ParsedDates::parse_all(&snapshot)?;
+
+        let tx = self.conn.transaction()?;
+        let counts = match append_snapshot(&tx, &digest, &snapshot, &dates) {
+            Ok(counts) => counts,
+            Err(e) => {
+                // Explicit for readers; dropping the transaction would roll
+                // back too, but the contract says so out loud.
+                let _ = tx.rollback();
+                return Err(e);
+            }
+        };
+        tx.commit()?;
+        Ok(IngestOutcome::Ingested {
+            snapshot_sha256: digest,
+            properties: counts.0,
+            receipts: counts.1,
+            income_entries: counts.2,
+            audit_items: counts.3,
+        })
+    }
+
     /// Close explicitly so a close failure is an error, not a silent drop.
     pub fn close(self) -> Result<(), WorkspaceError> {
         self.conn
             .close()
             .map_err(|(_, e)| WorkspaceError::Duckdb(e.to_string()))
     }
+}
+
+/// Every DATE the snapshot carries, parsed up front so the transaction can
+/// never fail half-way on a date. Field names address the offending value.
+struct ParsedDates {
+    receipts: Vec<NaiveDate>,
+    incomes: Vec<(NaiveDate, Option<NaiveDate>)>,
+    audit_received: Vec<Option<NaiveDate>>,
+}
+
+impl ParsedDates {
+    fn parse_all(snapshot: &Snapshot) -> Result<Self, WorkspaceError> {
+        let mut receipts = Vec::with_capacity(snapshot.receipts.len());
+        for (i, r) in snapshot.receipts.iter().enumerate() {
+            receipts.push(parse_date(&format!("receipts[{i}].date"), &r.date)?);
+        }
+        let mut incomes = Vec::with_capacity(snapshot.income_entries.len());
+        for (i, e) in snapshot.income_entries.iter().enumerate() {
+            let date = parse_date(&format!("income_entries[{i}].date"), &e.date)?;
+            let paid = match &e.payment_date {
+                Some(d) => Some(parse_date(&format!("income_entries[{i}].payment_date"), d)?),
+                None => None,
+            };
+            incomes.push((date, paid));
+        }
+        let mut audit_received = Vec::with_capacity(snapshot.audit_chain.len());
+        for (i, item) in snapshot.audit_chain.iter().enumerate() {
+            audit_received.push(match item {
+                AuditEvent::Document {
+                    received_date: Some(d),
+                    ..
+                } => Some(parse_date(&format!("audit_chain[{i}].received_date"), d)?),
+                _ => None,
+            });
+        }
+        Ok(Self {
+            receipts,
+            incomes,
+            audit_received,
+        })
+    }
+}
+
+fn parse_date(field: &str, value: &str) -> Result<NaiveDate, WorkspaceError> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| WorkspaceError::InvalidDate {
+        field: field.to_string(),
+        value: value.to_string(),
+    })
+}
+
+/// Append every table inside `tx`. Each Appender is flushed explicitly and
+/// dropped before the next one; the first error (append or flush) returns
+/// immediately so the caller rolls back. Returns
+/// (properties, receipts, income_entries, audit_items) row counts.
+fn append_snapshot(
+    tx: &Transaction<'_>,
+    digest: &str,
+    s: &Snapshot,
+    dates: &ParsedDates,
+) -> Result<(usize, usize, usize, usize), WorkspaceError> {
+    {
+        let mut app = tx.appender("snapshot_meta")?;
+        app.append_row(params![
+            digest,
+            s.schema_version.as_str(),
+            s.entity.owner_id,
+            i32::from(s.income_year),
+            s.generated_at.as_str(),
+            s.lock.all_properties_locked,
+            i32::from(s.lock.declaration_year),
+            s.source.app.as_str(),
+            s.source.environment.as_str(),
+        ])?;
+        app.flush()?;
+    }
+    {
+        let profile = s.entity.accounting_profile.as_ref();
+        let mut app = tx.appender("entity_context")?;
+        app.append_row(params![
+            s.entity.owner_id,
+            s.entity.display_name.as_str(),
+            s.entity.org_number.as_deref(),
+            s.entity.county.as_deref(),
+            s.entity.taxonomy_version.as_deref(),
+            profile.map(|p| p.vat_registered.as_str()),
+            profile.map(|p| p.bookkeeping_method.as_str()),
+            profile.map(|p| p.default_payment_method.as_str()),
+            profile.map(|p| p.sie_series.as_str()),
+        ])?;
+        app.flush()?;
+    }
+    {
+        let mut app = tx.appender("entity_operations")?;
+        for op in &s.entity.operation {
+            app.append_row(params![op.as_str()])?;
+        }
+        app.flush()?;
+    }
+    {
+        let mut app = tx.appender("properties")?;
+        for p in &s.properties {
+            app.append_row(params![
+                p.id,
+                p.name.as_str(),
+                p.slug.as_str(),
+                p.is_default,
+                p.tax_year.id,
+                p.tax_year.status.as_str(),
+                p.tax_year.locked_at.as_deref(),
+            ])?;
+        }
+        app.flush()?;
+    }
+    {
+        let mut app = tx.appender("receipts")?;
+        for (i, r) in s.receipts.iter().enumerate() {
+            let ctx = r.category_context.as_ref();
+            app.append_row(params![
+                r.id,
+                r.source_key.as_deref(),
+                r.property_id,
+                r.ordinal_number.map(|o| o as i32),
+                r.vendor.as_deref(),
+                dates.receipts[i],
+                r.category.as_deref(),
+                r.entry_type.as_str(),
+                r.area.as_str(),
+                ctx.map(|c| c.requires_business_share),
+                ctx.map(|c| c.investment_risk),
+                ctx.map(|c| c.vat_check),
+                ctx.map(|c| c.sensitive),
+                r.total_amount.0,
+                r.vat_amount.0,
+                r.rounding_amount.0,
+                r.net_amount.0,
+                r.payment_method.as_deref(),
+                r.note.as_deref(),
+                r.has_image,
+                r.confirmed_at.as_deref(),
+                i as i32,
+            ])?;
+        }
+        app.flush()?;
+    }
+    {
+        let mut app = tx.appender("income_entries")?;
+        for (i, e) in s.income_entries.iter().enumerate() {
+            let (date, paid) = dates.incomes[i];
+            app.append_row(params![
+                e.id,
+                e.source_key.as_deref(),
+                e.property_id,
+                e.income_type.as_str(),
+                date,
+                e.buyer_name.as_deref(),
+                e.description.as_str(),
+                e.amount_ex_vat.0,
+                e.vat_amount.0,
+                e.amount_inc_vat.0,
+                e.invoice_number.as_deref(),
+                paid,
+                e.document_count as i32,
+                i as i32,
+            ])?;
+        }
+        app.flush()?;
+    }
+    {
+        let mut app = tx.appender("audit_chain")?;
+        for (i, item) in s.audit_chain.iter().enumerate() {
+            match item {
+                AuditEvent::Event {
+                    event_type,
+                    property_id,
+                    occurred_at,
+                    ..
+                } => app.append_row(params![
+                    i as i32,
+                    "event",
+                    *property_id,
+                    event_type.as_str(),
+                    occurred_at.as_str(),
+                    Option::<&str>::None,
+                    Option::<NaiveDate>::None,
+                    Option::<&str>::None,
+                    Option::<&str>::None,
+                ])?,
+                AuditEvent::Document {
+                    document_type,
+                    property_id,
+                    checksum_sha256,
+                    storage_backend,
+                    ..
+                } => app.append_row(params![
+                    i as i32,
+                    "document",
+                    *property_id,
+                    Option::<&str>::None,
+                    Option::<&str>::None,
+                    document_type.as_str(),
+                    dates.audit_received[i],
+                    checksum_sha256.as_deref(),
+                    storage_backend.as_str(),
+                ])?,
+            }
+        }
+        app.flush()?;
+    }
+    Ok((
+        s.properties.len(),
+        s.receipts.len(),
+        s.income_entries.len(),
+        s.audit_chain.len(),
+    ))
 }
 
 /// Canonical snapshot bytes — exactly what Django hashes:
