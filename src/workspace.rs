@@ -9,8 +9,10 @@
 //! rules, schema v1), the snapshot digest (exactly Django's
 //! canonicalisation, hashed by DuckDB's own `sha256`) and ingestion (one
 //! transaction, one Appender per table, explicit flush, rollback on any
-//! error). Readback follows. SV-03's tables (`engine_run_meta`, accounting
-//! cases, decision lines, findings) are not created here.
+//! error) and readback (typed rows, contract-ordered queries use explicit
+//! ORDER BY, nothing read from snapshot JSON after ingest). SV-03's tables
+//! (`engine_run_meta`, accounting cases, decision lines, findings) are not
+//! created here.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,7 @@ use chrono::NaiveDate;
 use duckdb::{params, Connection, Transaction};
 use serde_json::Value;
 
+use crate::money::Ore;
 use crate::snapshot::{parse_snapshot, AuditEvent, Snapshot};
 
 /// Schema version stored in the file (`workspace_meta.workspace_schema`).
@@ -99,6 +102,107 @@ pub enum IngestOutcome {
     AlreadyIngested {
         snapshot_sha256: String,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Readback rows — what SV-03/SV-04 consume. Read from DuckDB only; the
+// snapshot JSON is never opened again after ingest.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMeta {
+    pub snapshot_sha256: String,
+    pub schema_version: String,
+    pub owner_id: i64,
+    pub income_year: i32,
+    pub generated_at: String,
+    pub all_properties_locked: bool,
+    pub declaration_year: i32,
+    pub source_app: String,
+    pub source_environment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityContext {
+    pub owner_id: i64,
+    pub display_name: String,
+    pub org_number: Option<String>,
+    pub county: Option<String>,
+    pub taxonomy_version: Option<String>,
+    pub vat_registered: Option<String>,
+    pub bookkeeping_method: Option<String>,
+    pub default_payment_method: Option<String>,
+    pub sie_series: Option<String>,
+    /// `entity.operation` items, sorted (the set has no contractual order).
+    pub operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyRow {
+    pub property_id: i64,
+    pub name: String,
+    pub slug: String,
+    pub is_default: bool,
+    pub tax_year_id: i64,
+    pub tax_year_status: String,
+    pub locked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptRow {
+    pub id: i64,
+    pub source_key: Option<String>,
+    pub property_id: i64,
+    pub ordinal_number: Option<i32>,
+    pub vendor: Option<String>,
+    pub date: NaiveDate,
+    pub category: Option<String>,
+    pub entry_type: String,
+    pub area: String,
+    pub requires_business_share: Option<bool>,
+    pub investment_risk: Option<bool>,
+    pub vat_check: Option<bool>,
+    pub sensitive: Option<bool>,
+    pub total: Ore,
+    pub vat: Ore,
+    pub rounding: Ore,
+    pub net: Ore,
+    pub payment_method: Option<String>,
+    pub note: Option<String>,
+    pub has_image: bool,
+    pub confirmed_at: Option<String>,
+    pub selector_position: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomeRow {
+    pub id: i64,
+    pub source_key: Option<String>,
+    pub property_id: i64,
+    pub income_type: String,
+    pub date: NaiveDate,
+    pub buyer_name: Option<String>,
+    pub description: String,
+    pub ex_vat: Ore,
+    pub vat: Ore,
+    pub inc_vat: Ore,
+    pub invoice_number: Option<String>,
+    pub payment_date: Option<NaiveDate>,
+    pub document_count: i32,
+    pub snapshot_position: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub seq: i32,
+    pub kind: String,
+    pub property_id: i64,
+    pub event_type: Option<String>,
+    pub occurred_at: Option<String>,
+    pub document_type: Option<String>,
+    pub received_date: Option<NaiveDate>,
+    pub checksum_sha256: Option<String>,
+    pub storage_backend: Option<String>,
 }
 
 /// Schema v1 — exactly the snapshot's content, typed. Column order and
@@ -459,12 +563,220 @@ impl Workspace {
         })
     }
 
+    /// Every read below requires exactly one ingested snapshot.
+    fn require_snapshot(&self) -> Result<(), WorkspaceError> {
+        match self.snapshot_count()? {
+            0 => Err(WorkspaceError::NotIngested),
+            1 => Ok(()),
+            n => Err(WorkspaceError::Corrupt(format!(
+                "snapshot_meta must have 0 or 1 rows, found {n}"
+            ))),
+        }
+    }
+
+    pub fn read_meta(&self) -> Result<WorkspaceMeta, WorkspaceError> {
+        self.require_snapshot()?;
+        Ok(self.conn.query_row(
+            "SELECT snapshot_sha256, schema_version, owner_id, income_year, generated_at, \
+             all_properties_locked, declaration_year, source_app, source_environment \
+             FROM snapshot_meta",
+            [],
+            |r| {
+                Ok(WorkspaceMeta {
+                    snapshot_sha256: r.get(0)?,
+                    schema_version: r.get(1)?,
+                    owner_id: r.get(2)?,
+                    income_year: r.get(3)?,
+                    generated_at: r.get(4)?,
+                    all_properties_locked: r.get(5)?,
+                    declaration_year: r.get(6)?,
+                    source_app: r.get(7)?,
+                    source_environment: r.get(8)?,
+                })
+            },
+        )?)
+    }
+
+    pub fn read_entity(&self) -> Result<EntityContext, WorkspaceError> {
+        self.require_snapshot()?;
+        let mut entity = self.conn.query_row(
+            "SELECT owner_id, display_name, org_number, county, taxonomy_version, vat_registered, \
+             bookkeeping_method, default_payment_method, sie_series FROM entity_context",
+            [],
+            |r| {
+                Ok(EntityContext {
+                    owner_id: r.get(0)?,
+                    display_name: r.get(1)?,
+                    org_number: r.get(2)?,
+                    county: r.get(3)?,
+                    taxonomy_version: r.get(4)?,
+                    vat_registered: r.get(5)?,
+                    bookkeeping_method: r.get(6)?,
+                    default_payment_method: r.get(7)?,
+                    sie_series: r.get(8)?,
+                    operations: Vec::new(),
+                })
+            },
+        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT operation FROM entity_operations ORDER BY operation")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for op in rows {
+            entity.operations.push(op?);
+        }
+        Ok(entity)
+    }
+
+    pub fn read_properties(&self) -> Result<Vec<PropertyRow>, WorkspaceError> {
+        self.require_snapshot()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT property_id, name, slug, is_default, tax_year_id, tax_year_status, locked_at \
+             FROM properties ORDER BY property_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PropertyRow {
+                property_id: r.get(0)?,
+                name: r.get(1)?,
+                slug: r.get(2)?,
+                is_default: r.get(3)?,
+                tax_year_id: r.get(4)?,
+                tax_year_status: r.get(5)?,
+                locked_at: r.get(6)?,
+            })
+        })?;
+        collect(rows)
+    }
+
+    /// Receipts in the contract order (`selector_position` = the snapshot's
+    /// `receipts_for_year` order). Never re-sorted by date or ordinal (R12).
+    pub fn read_receipts(&self) -> Result<Vec<ReceiptRow>, WorkspaceError> {
+        self.require_snapshot()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_key, property_id, ordinal_number, vendor, date, category, entry_type, \
+             area, requires_business_share, investment_risk, vat_check, sensitive, total_ore, vat_ore, \
+             rounding_ore, net_ore, payment_method, note, has_image, confirmed_at, selector_position \
+             FROM receipts ORDER BY selector_position",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ReceiptRow {
+                id: r.get(0)?,
+                source_key: r.get(1)?,
+                property_id: r.get(2)?,
+                ordinal_number: r.get(3)?,
+                vendor: r.get(4)?,
+                date: r.get(5)?,
+                category: r.get(6)?,
+                entry_type: r.get(7)?,
+                area: r.get(8)?,
+                requires_business_share: r.get(9)?,
+                investment_risk: r.get(10)?,
+                vat_check: r.get(11)?,
+                sensitive: r.get(12)?,
+                total: Ore(r.get(13)?),
+                vat: Ore(r.get(14)?),
+                rounding: Ore(r.get(15)?),
+                net: Ore(r.get(16)?),
+                payment_method: r.get(17)?,
+                note: r.get(18)?,
+                has_image: r.get(19)?,
+                confirmed_at: r.get(20)?,
+                selector_position: r.get(21)?,
+            })
+        })?;
+        collect(rows)
+    }
+
+    /// Income entries in snapshot order (`snapshot_position` = (date, pk)).
+    pub fn read_income_entries(&self) -> Result<Vec<IncomeRow>, WorkspaceError> {
+        self.require_snapshot()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_key, property_id, income_type, date, buyer_name, description, \
+             ex_vat_ore, vat_ore, inc_vat_ore, invoice_number, payment_date, document_count, \
+             snapshot_position FROM income_entries ORDER BY snapshot_position",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(IncomeRow {
+                id: r.get(0)?,
+                source_key: r.get(1)?,
+                property_id: r.get(2)?,
+                income_type: r.get(3)?,
+                date: r.get(4)?,
+                buyer_name: r.get(5)?,
+                description: r.get(6)?,
+                ex_vat: Ore(r.get(7)?),
+                vat: Ore(r.get(8)?),
+                inc_vat: Ore(r.get(9)?),
+                invoice_number: r.get(10)?,
+                payment_date: r.get(11)?,
+                document_count: r.get(12)?,
+                snapshot_position: r.get(13)?,
+            })
+        })?;
+        collect(rows)
+    }
+
+    pub fn read_audit_chain(&self) -> Result<Vec<AuditRow>, WorkspaceError> {
+        self.require_snapshot()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, kind, property_id, event_type, occurred_at, document_type, received_date, \
+             checksum_sha256, storage_backend FROM audit_chain ORDER BY seq",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AuditRow {
+                seq: r.get(0)?,
+                kind: r.get(1)?,
+                property_id: r.get(2)?,
+                event_type: r.get(3)?,
+                occurred_at: r.get(4)?,
+                document_type: r.get(5)?,
+                received_date: r.get(6)?,
+                checksum_sha256: r.get(7)?,
+                storage_backend: r.get(8)?,
+            })
+        })?;
+        collect(rows)
+    }
+
+    /// Deterministic fingerprint of the workspace's logical content — built
+    /// from the readback rows in contract order and hashed by DuckDB's
+    /// `sha256`, so two workspaces ingested from the same snapshot compare
+    /// equal even though their file bytes need not. Never touches the file's
+    /// physical layout.
+    pub fn logical_fingerprint(&self) -> Result<String, WorkspaceError> {
+        let mut text = String::new();
+        let meta = self.read_meta()?;
+        text.push_str(&format!("meta|{meta:?}\n"));
+        text.push_str(&format!("entity|{:?}\n", self.read_entity()?));
+        for p in self.read_properties()? {
+            text.push_str(&format!("property|{p:?}\n"));
+        }
+        for r in self.read_receipts()? {
+            text.push_str(&format!("receipt|{r:?}\n"));
+        }
+        for e in self.read_income_entries()? {
+            text.push_str(&format!("income|{e:?}\n"));
+        }
+        for a in self.read_audit_chain()? {
+            text.push_str(&format!("audit|{a:?}\n"));
+        }
+        self.sha256_hex(text.as_bytes())
+    }
+
     /// Close explicitly so a close failure is an error, not a silent drop.
     pub fn close(self) -> Result<(), WorkspaceError> {
         self.conn
             .close()
             .map_err(|(_, e)| WorkspaceError::Duckdb(e.to_string()))
     }
+}
+
+fn collect<T, I: Iterator<Item = duckdb::Result<T>>>(rows: I) -> Result<Vec<T>, WorkspaceError> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Every DATE the snapshot carries, parsed up front so the transaction can

@@ -5,8 +5,10 @@
 use std::fs;
 use std::path::PathBuf;
 
+use chrono::NaiveDate;
 use duckdb::Connection;
 use serde_json::Value;
+use sieverk::money::Ore;
 use sieverk::snapshot::parse_snapshot;
 use sieverk::workspace::{
     canonical_snapshot_bytes, IngestOutcome, Workspace, WorkspaceError, SCHEMA_V1_TABLES,
@@ -828,4 +830,303 @@ fn h_invalid_date_is_refused_before_any_row_is_written() {
         ws.ingest(&fixture(TESTGARDEN)),
         Ok(IngestOutcome::Ingested { .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Slice 4 — readback: typed rows, explicit ORDER BY, no JSON after ingest
+// ---------------------------------------------------------------------------
+
+fn date(s: &str) -> NaiveDate {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("fixture date")
+}
+
+#[test]
+fn readback_equals_the_typed_snapshot_field_for_field_in_contract_order() {
+    let db = TempDb::new("readback-testgarden");
+    let raw = fixture(TESTGARDEN);
+    let snap = parse_snapshot(&raw).expect("typed parse");
+    ingest_testgarden(&db).close().expect("close");
+    let ws = Workspace::open(db.path()).expect("reopen");
+
+    let meta = ws.read_meta().expect("meta");
+    assert_eq!(
+        meta.snapshot_sha256,
+        ws.snapshot_digest(&raw).expect("expected digest")
+    );
+    assert_eq!(meta.schema_version, snap.schema_version);
+    assert_eq!(meta.owner_id, snap.entity.owner_id);
+    assert_eq!(meta.income_year, i32::from(snap.income_year));
+    assert_eq!(meta.generated_at, snap.generated_at);
+    assert_eq!(meta.all_properties_locked, snap.lock.all_properties_locked);
+    assert_eq!(meta.declaration_year, i32::from(snap.lock.declaration_year));
+    assert_eq!(
+        (meta.source_app.as_str(), meta.source_environment.as_str()),
+        (snap.source.app.as_str(), snap.source.environment.as_str())
+    );
+
+    let entity = ws.read_entity().expect("entity");
+    let profile = snap
+        .entity
+        .accounting_profile
+        .as_ref()
+        .expect("1.1 profile");
+    assert_eq!(entity.owner_id, snap.entity.owner_id);
+    assert_eq!(entity.display_name, snap.entity.display_name);
+    assert_eq!(entity.org_number, snap.entity.org_number);
+    assert_eq!(entity.county, snap.entity.county);
+    assert_eq!(entity.taxonomy_version, snap.entity.taxonomy_version);
+    assert_eq!(
+        entity.vat_registered.as_deref(),
+        Some(profile.vat_registered.as_str())
+    );
+    assert_eq!(
+        entity.bookkeeping_method.as_deref(),
+        Some(profile.bookkeeping_method.as_str())
+    );
+    assert_eq!(
+        entity.default_payment_method.as_deref(),
+        Some(profile.default_payment_method.as_str())
+    );
+    assert_eq!(
+        entity.sie_series.as_deref(),
+        Some(profile.sie_series.as_str())
+    );
+    let mut ops = snap.entity.operation.clone();
+    ops.sort();
+    assert_eq!(entity.operations, ops);
+
+    let properties = ws.read_properties().expect("properties");
+    let mut expected_props: Vec<_> = snap.properties.iter().collect();
+    expected_props.sort_by_key(|p| p.id);
+    assert_eq!(properties.len(), expected_props.len());
+    for (row, p) in properties.iter().zip(expected_props) {
+        assert_eq!(
+            (
+                row.property_id,
+                row.name.as_str(),
+                row.slug.as_str(),
+                row.is_default
+            ),
+            (p.id, p.name.as_str(), p.slug.as_str(), p.is_default)
+        );
+        assert_eq!(
+            (row.tax_year_id, row.tax_year_status.as_str()),
+            (p.tax_year.id, p.tax_year.status.as_str())
+        );
+        assert_eq!(row.locked_at, p.tax_year.locked_at);
+    }
+
+    let receipts = ws.read_receipts().expect("receipts");
+    assert_eq!(receipts.len(), snap.receipts.len());
+    for (i, (row, r)) in receipts.iter().zip(&snap.receipts).enumerate() {
+        assert_eq!(
+            row.selector_position, i as i32,
+            "vector order is the contract order"
+        );
+        assert_eq!(row.id, r.id);
+        assert_eq!(row.source_key, r.source_key);
+        assert_eq!(row.property_id, r.property_id);
+        assert_eq!(row.ordinal_number, r.ordinal_number.map(|o| o as i32));
+        assert_eq!(row.vendor, r.vendor);
+        assert_eq!(row.date, date(&r.date));
+        assert_eq!(row.category, r.category);
+        assert_eq!(
+            (row.entry_type.as_str(), row.area.as_str()),
+            (r.entry_type.as_str(), r.area.as_str())
+        );
+        let ctx = r.category_context.as_ref().expect("1.1 context");
+        assert_eq!(
+            (
+                row.requires_business_share,
+                row.investment_risk,
+                row.vat_check,
+                row.sensitive
+            ),
+            (
+                Some(ctx.requires_business_share),
+                Some(ctx.investment_risk),
+                Some(ctx.vat_check),
+                Some(ctx.sensitive)
+            )
+        );
+        assert_eq!(
+            (row.total, row.vat, row.rounding, row.net),
+            (
+                r.total_amount,
+                r.vat_amount,
+                r.rounding_amount,
+                r.net_amount
+            )
+        );
+        assert_eq!(row.payment_method, r.payment_method);
+        assert_eq!(row.note, r.note);
+        assert_eq!(row.has_image, r.has_image);
+        assert_eq!(row.confirmed_at, r.confirmed_at);
+    }
+    let big = receipts
+        .iter()
+        .find(|r| r.category.as_deref() == Some("Större inköp"))
+        .expect("row");
+    assert_eq!((big.total, big.vat), (Ore(6_000_000), Ore(1_200_000)));
+
+    let incomes = ws.read_income_entries().expect("incomes");
+    assert_eq!(incomes.len(), snap.income_entries.len());
+    for (i, (row, e)) in incomes.iter().zip(&snap.income_entries).enumerate() {
+        assert_eq!(row.snapshot_position, i as i32);
+        assert_eq!((row.id, row.property_id), (e.id, e.property_id));
+        assert_eq!(row.source_key, e.source_key);
+        assert_eq!(row.income_type, e.income_type);
+        assert_eq!(row.date, date(&e.date));
+        assert_eq!(row.buyer_name, e.buyer_name);
+        assert_eq!(row.description, e.description);
+        assert_eq!(
+            (row.ex_vat, row.vat, row.inc_vat),
+            (e.amount_ex_vat, e.vat_amount, e.amount_inc_vat)
+        );
+        assert_eq!(row.invoice_number, e.invoice_number);
+        assert_eq!(row.payment_date, e.payment_date.as_deref().map(date));
+        assert_eq!(row.document_count, e.document_count as i32);
+    }
+    assert!(ws.read_audit_chain().expect("audit").is_empty());
+}
+
+#[test]
+fn readback_is_identical_before_and_after_reopen_and_across_workspaces() {
+    let a = TempDb::new("readback-a");
+    let b = TempDb::new("readback-b");
+    let ws_a = ingest_testgarden(&a);
+    let before = (
+        ws_a.read_receipts().expect("r"),
+        ws_a.read_income_entries().expect("i"),
+        ws_a.read_properties().expect("p"),
+        ws_a.read_entity().expect("e"),
+        ws_a.read_meta().expect("m"),
+    );
+    let fp_a = ws_a.logical_fingerprint().expect("fp");
+    ws_a.close().expect("close");
+    let ws_a = Workspace::open(a.path()).expect("reopen");
+    let after = (
+        ws_a.read_receipts().expect("r"),
+        ws_a.read_income_entries().expect("i"),
+        ws_a.read_properties().expect("p"),
+        ws_a.read_entity().expect("e"),
+        ws_a.read_meta().expect("m"),
+    );
+    assert_eq!(before, after);
+    assert_eq!(ws_a.logical_fingerprint().expect("fp"), fp_a);
+
+    // A second file from the same snapshot is logically equivalent — bytes may differ.
+    let ws_b = ingest_testgarden(&b);
+    assert_eq!(ws_b.logical_fingerprint().expect("fp"), fp_a);
+    assert_eq!(ws_b.read_receipts().expect("r"), after.0);
+    assert_eq!(fp_a.len(), 64);
+
+    // Another snapshot ⇒ another fingerprint.
+    let c = TempDb::new("readback-c");
+    let mut ws_c = Workspace::create(c.path()).expect("create");
+    ws_c.ingest(&fixture("minimal-1.1.json")).expect("ingest");
+    assert_ne!(ws_c.logical_fingerprint().expect("fp"), fp_a);
+}
+
+#[test]
+fn empty_workspace_refuses_every_read_with_not_ingested() {
+    let db = TempDb::new("readback-empty");
+    let ws = Workspace::create(db.path()).expect("create");
+    assert!(matches!(ws.read_meta(), Err(WorkspaceError::NotIngested)));
+    assert!(matches!(ws.read_entity(), Err(WorkspaceError::NotIngested)));
+    assert!(matches!(
+        ws.read_properties(),
+        Err(WorkspaceError::NotIngested)
+    ));
+    assert!(matches!(
+        ws.read_receipts(),
+        Err(WorkspaceError::NotIngested)
+    ));
+    assert!(matches!(
+        ws.read_income_entries(),
+        Err(WorkspaceError::NotIngested)
+    ));
+    assert!(matches!(
+        ws.read_audit_chain(),
+        Err(WorkspaceError::NotIngested)
+    ));
+    assert!(matches!(
+        ws.logical_fingerprint(),
+        Err(WorkspaceError::NotIngested)
+    ));
+}
+
+#[test]
+fn schema_1_0_readback_keeps_missing_context_and_profile_as_none() {
+    let db = TempDb::new("readback-1-0");
+    let mut ws = Workspace::create(db.path()).expect("create");
+    ws.ingest(&fixture("minimal-1.0.json")).expect("ingest");
+    let entity = ws.read_entity().expect("entity");
+    assert_eq!(
+        (
+            entity.vat_registered,
+            entity.bookkeeping_method,
+            entity.default_payment_method,
+            entity.sie_series
+        ),
+        (None, None, None, None)
+    );
+    for r in ws.read_receipts().expect("receipts") {
+        assert_eq!(
+            (
+                r.requires_business_share,
+                r.investment_risk,
+                r.vat_check,
+                r.sensitive
+            ),
+            (None, None, None, None)
+        );
+    }
+}
+
+#[test]
+fn audit_chain_readback_keeps_document_nulls_and_event_fields() {
+    let db = TempDb::new("readback-audit");
+    let mut ws = Workspace::create(db.path()).expect("create");
+    ws.ingest(&fixture("document-nulls-1.1.json"))
+        .expect("ingest");
+    let chain = ws.read_audit_chain().expect("audit");
+    assert_eq!(
+        chain.iter().map(|a| a.seq).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(chain[0].kind, "event");
+    assert_eq!(
+        chain[0].event_type.as_deref(),
+        Some("submitted_to_accountant")
+    );
+    assert_eq!(
+        chain[0].occurred_at.as_deref(),
+        Some("2027-01-15T09:00:00+01:00")
+    );
+    assert_eq!(
+        (
+            chain[0].document_type.as_deref(),
+            chain[0].received_date,
+            chain[0].storage_backend.as_deref()
+        ),
+        (None, None, None)
+    );
+    assert_eq!(chain[1].kind, "document");
+    assert_eq!(chain[1].received_date, Some(date("2027-02-20")));
+    assert_eq!(
+        chain[1].checksum_sha256.as_deref(),
+        Some("0000000000000000000000000000000000000000000000000000000000000000")
+    );
+    assert_eq!(chain[1].storage_backend.as_deref(), Some("b2"));
+    assert_eq!(
+        chain[2].document_type.as_deref(),
+        Some("supporting_document")
+    );
+    assert_eq!(
+        (chain[2].received_date, chain[2].checksum_sha256.as_deref()),
+        (None, None)
+    );
+    assert_eq!(chain[2].storage_backend.as_deref(), Some("cloudinary"));
+    assert!(chain.iter().all(|a| a.property_id == 7));
 }
