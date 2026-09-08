@@ -28,6 +28,8 @@
 *.duckdb
 *.duckdb.wal
 *.db
+# Local DuckDB workspaces / LIVE-E2E scratch (SV-02D) — evidence, never source
+temp/
 
 # ── Engine output (reports, generated exports) — artifacts, not source ─
 /out/

@@ -88,3 +88,40 @@ as warnings instead — this is also just good parser hygiene.
 year, account/voucher/row counts, `Status: Valid` — and the unbalanced fixture
 prints `VOUCHER_NOT_BALANCED` with the 100.00 difference. Nothing else.
 No DuckDB, no SolidJS, no Django contact. Those come after this works.
+
+## DuckDB engine workspace (SV-02D) — evidence note
+
+Not SIE format, but the engine's input side; recorded here so the notes stay
+the one-screen map of what exists.
+
+- Workspace schema **v1**, file-backed DuckDB (`src/workspace.rs`), created by
+  `Workspace::create` (refuses an existing path) and verified by `open`
+  (`workspace_meta` exactly one row, `snapshot_meta` 0 or 1 rows).
+- Django/PostgreSQL remains the source of truth; the workspace is derived
+  from one immutable snapshot and never written back.
+- Canonical snapshot digest = Django's `snapshot_sha256()`: top-level
+  `generated_at` excluded, keys sorted, compact separators, UTF-8, hashed with
+  DuckDB's own `sha256(BLOB)` — proven against `fixtures/snapshots/django-digests.json`.
+- Ingestion: one transaction, one Appender per table, explicit `flush()`,
+  commit only after every table succeeded; any append/flush error rolls
+  everything back (0 snapshot rows, `workspace_meta` intact). All dates are
+  parsed before the transaction opens.
+- True DuckDB types: money `BIGINT` öre (`Ore(i64)`), dates `DATE`
+  (`chrono::NaiveDate`), flags `BOOLEAN`; category context and the 1.0
+  accounting profile stay `NULL` when the snapshot lacks them — never a
+  guessed default.
+- Typed readback from DuckDB only. Contract-ordered queries carry explicit
+  `ORDER BY`: properties `property_id`, receipts `selector_position`, income
+  `snapshot_position`, audit `seq`, operations `operation`. The singleton
+  reads (`snapshot_meta`, `entity_context`) need no contractual order.
+- `logical_fingerprint()`: deterministic evidence of the logical content
+  within one code version and one exact snapshot artefact — built from the
+  typed readback (it includes `generated_at` through `read_meta()`), hashed by
+  DuckDB. The physical `.duckdb` bytes are **not** the determinism contract,
+  and two separately regenerated snapshots with different `generated_at` are
+  **not** promised to share a fingerprint.
+- CLI: `sieverk ingest --snapshot <json> --workspace <duckdb>` (create + ingest,
+  evidence-only output) and `sieverk inspect-workspace --workspace <duckdb>`
+  (open only, readback only, no rows / org number printed).
+- Not yet: `engine_run_meta`, SV-03 tables, schema v2, decisions, SIE output
+  from the workspace.

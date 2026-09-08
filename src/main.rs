@@ -11,6 +11,7 @@ use sieverk::ruleset::load_masterdata;
 use sieverk::snapshot::{parse_snapshot, Snapshot};
 use sieverk::validator::{validate, Report, Severity};
 use sieverk::vouchers::{parse_vouchers, VoucherData};
+use sieverk::workspace::{IngestOutcome, Workspace};
 
 struct Parsed {
     meta: Metadata,
@@ -42,6 +43,30 @@ fn load_and_parse(path: &str) -> Result<Parsed, String> {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().skip(1).collect();
+    // DuckDB workspace (SV-02D): explicit paths, no defaults, strict options.
+    match argv.first().map(String::as_str) {
+        Some("ingest") => {
+            return match parse_options(&argv[1..], &["--snapshot", "--workspace"]) {
+                Ok(opts) => finish(ingest_workspace(Path::new(&opts[0]), Path::new(&opts[1]))),
+                Err(e) => {
+                    eprintln!("{e}");
+                    eprintln!("usage: sieverk ingest --snapshot <snapshot.json> --workspace <file.duckdb>");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Some("inspect-workspace") => {
+            return match parse_options(&argv[1..], &["--workspace"]) {
+                Ok(opts) => finish(inspect_workspace(Path::new(&opts[0]))),
+                Err(e) => {
+                    eprintln!("{e}");
+                    eprintln!("usage: sieverk inspect-workspace --workspace <file.duckdb>");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        _ => {}
+    }
     // Masterdata takes an explicit root — there is no default root, by
     // contract (mastermatris v1.2 §D).
     if argv.first().map(String::as_str) == Some("inspect-masterdata") {
@@ -54,7 +79,7 @@ fn main() -> ExitCode {
         };
     }
     let mut args = argv.into_iter();
-    // Four subcommands still do not justify a parser-generator dependency.
+    // The small CLI still does not justify a parser-generator dependency.
     // A bare path is treated as inspect-sie, which also keeps the CI
     // smoke step (`cargo run -- fixtures/...`) working unchanged.
     let (command, path) = match (args.next(), args.next()) {
@@ -68,6 +93,8 @@ fn main() -> ExitCode {
             eprintln!("usage: sieverk <inspect-sie|validate-sie> <file.se>");
             eprintln!("       sieverk inspect-snapshot <snapshot.json>");
             eprintln!("       sieverk inspect-masterdata --root <generated-dir>");
+            eprintln!("       sieverk ingest --snapshot <snapshot.json> --workspace <file.duckdb>");
+            eprintln!("       sieverk inspect-workspace --workspace <file.duckdb>");
             return ExitCode::FAILURE;
         }
     };
@@ -298,10 +325,116 @@ fn inspect_masterdata(root: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Print a command's text on success, its error on failure — never both.
+fn finish(result: Result<String, String>) -> ExitCode {
+    match result {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Strict `--name value` parsing for the workspace commands: every option in
+/// `required` exactly once, nothing else. Values come back in `required`
+/// order. No defaults, no positionals, no silent acceptance of a typo.
+fn parse_options(args: &[String], required: &[&str]) -> Result<Vec<String>, String> {
+    let mut values: Vec<Option<String>> = vec![None; required.len()];
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let Some(slot) = required.iter().position(|r| *r == arg.as_str()) else {
+            return Err(if arg.starts_with('-') {
+                format!("unknown option {arg}")
+            } else {
+                format!("unexpected argument {arg}")
+            });
+        };
+        let Some(value) = args.get(i + 1) else {
+            return Err(format!("{arg} requires a value"));
+        };
+        if value.starts_with("--") {
+            return Err(format!("{arg} requires a value"));
+        }
+        if values[slot].is_some() {
+            return Err(format!("{arg} given more than once"));
+        }
+        values[slot] = Some(value.clone());
+        i += 2;
+    }
+    let mut out = Vec::with_capacity(required.len());
+    for (name, value) in required.iter().zip(values) {
+        out.push(value.ok_or_else(|| format!("missing required option {name}"))?);
+    }
+    Ok(out)
+}
+
+/// `ingest`: raw snapshot bytes → new workspace file → `Workspace::ingest`.
+/// Uses the proven `create()` contract (an existing path is refused) and
+/// changes nothing about what happens to an empty file if ingest fails
+/// afterwards — that behaviour is tested and documented, not invented here.
+/// Output is evidence only: no rows, no names, no org number.
+fn ingest_workspace(snapshot: &Path, workspace: &Path) -> Result<String, String> {
+    let raw =
+        fs::read(snapshot).map_err(|e| format!("could not read {}: {e}", snapshot.display()))?;
+    let mut ws = Workspace::create(workspace).map_err(|e| e.to_string())?;
+    let outcome = ws.ingest(&raw).map_err(|e| format!("ingest failed: {e}"))?;
+    ws.close().map_err(|e| e.to_string())?;
+    match outcome {
+        IngestOutcome::Ingested {
+            snapshot_sha256,
+            properties,
+            receipts,
+            income_entries,
+            audit_items,
+        } => Ok(format!(
+            "workspace={}\nsnapshot_sha256={snapshot_sha256}\nproperties={properties}\n\
+             receipts={receipts}\nincome_entries={income_entries}\naudit_items={audit_items}\n",
+            workspace.display()
+        )),
+        IngestOutcome::AlreadyIngested { snapshot_sha256 } => Err(format!(
+            "workspace already holds snapshot {snapshot_sha256} (unexpected after create)"
+        )),
+    }
+}
+
+/// `inspect-workspace`: open (never create) and report through the typed
+/// DuckDB readback only — no snapshot JSON, no row dumps, no org number.
+fn inspect_workspace(workspace: &Path) -> Result<String, String> {
+    let ws = Workspace::open(workspace).map_err(|e| e.to_string())?;
+    let schema = ws.schema_version().map_err(|e| e.to_string())?;
+    let meta = ws.read_meta().map_err(|e| e.to_string())?;
+    // Read (and thereby validate) entity_context, but print nothing from it:
+    // display_name can be a person's name for an enskild firma.
+    ws.read_entity().map_err(|e| e.to_string())?;
+    let properties = ws.read_properties().map_err(|e| e.to_string())?.len();
+    let receipts = ws.read_receipts().map_err(|e| e.to_string())?.len();
+    let income_entries = ws.read_income_entries().map_err(|e| e.to_string())?.len();
+    let audit_items = ws.read_audit_chain().map_err(|e| e.to_string())?.len();
+    let fingerprint = ws.logical_fingerprint().map_err(|e| e.to_string())?;
+    Ok(format!(
+        "workspace_schema={schema}\nsnapshot_sha256={}\nsnapshot_schema_version={}\nowner_id={}\n\
+         income_year={}\nproperties={properties}\nreceipts={receipts}\n\
+         income_entries={income_entries}\naudit_items={audit_items}\nlogical_fingerprint={fingerprint}\n",
+        meta.snapshot_sha256,
+        meta.schema_version,
+        meta.owner_id,
+        meta.income_year
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{inspect_snapshot, mask_org_number};
+    use super::{
+        ingest_workspace, inspect_snapshot, inspect_workspace, mask_org_number, parse_options,
+    };
+    use sieverk::workspace::{Workspace, WorkspaceError};
     use sieverk::{accounts, decode_sie_bytes, metadata, validator, vouchers};
+    use std::path::{Path, PathBuf};
 
     /// The week-one finish line, part one: the valid fixture comes out
     /// of the full pipeline with a clean verdict.
@@ -468,5 +601,211 @@ mod tests {
         let e = inspect_snapshot("fixtures/snapshots/does-not-exist.json")
             .expect_err("missing file is an error");
         assert!(e.starts_with("could not read"), "{e}");
+    }
+
+    // -- DuckDB workspace CLI (SV-02D slice 5) ---------------------------------
+
+    const TESTGARDEN: &str = "fixtures/snapshots/testgarden-2026-1.1.json";
+    const TESTGARDEN_DIGEST: &str =
+        "5d38739ba786009d1b3ad2d00b69582c8ecb349fcf5be8aa2b16dbb113c9c950";
+
+    /// A unique, absent path under the OS temp dir; removed again on drop.
+    struct TempDb(PathBuf);
+
+    impl TempDb {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join("sieverk-cli-tests");
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let path = dir.join(format!("{}-{name}.duckdb", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("duckdb.wal"));
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("duckdb.wal"));
+        }
+    }
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn cli_ingest_creates_workspace_from_testgarden() {
+        let db = TempDb::new("ingest");
+        assert!(!db.path().exists());
+        let text = ingest_workspace(Path::new(TESTGARDEN), db.path()).expect("ingest");
+        assert!(db.path().is_file());
+        assert!(
+            text.contains(&format!("snapshot_sha256={TESTGARDEN_DIGEST}\n")),
+            "{text}"
+        );
+        assert!(text.contains("properties=2\n"), "{text}");
+        assert!(text.contains("receipts=21\n"), "{text}");
+        assert!(text.contains("income_entries=6\n"), "{text}");
+        assert!(text.contains("audit_items=0\n"), "{text}");
+        assert!(
+            !text.contains("999999-0006"),
+            "org number must not be printed"
+        );
+        assert!(!text.contains("Röjarlaget"), "no vendor rows");
+        let ws = Workspace::open(db.path()).expect("reopen");
+        assert_eq!(ws.read_properties().expect("p").len(), 2);
+        assert_eq!(ws.read_receipts().expect("r").len(), 21);
+        assert_eq!(ws.read_income_entries().expect("i").len(), 6);
+        assert_eq!(ws.read_audit_chain().expect("a").len(), 0);
+        assert_eq!(ws.snapshot_sha256().expect("digest"), TESTGARDEN_DIGEST);
+    }
+
+    #[test]
+    fn cli_ingest_refuses_existing_workspace() {
+        let db = TempDb::new("ingest-existing");
+        ingest_workspace(Path::new(TESTGARDEN), db.path()).expect("first ingest");
+        let before = std::fs::read(db.path()).expect("read");
+        let e = ingest_workspace(Path::new(TESTGARDEN), db.path()).expect_err("must refuse");
+        assert!(e.contains("already exists"), "{e}");
+        assert_eq!(
+            std::fs::read(db.path()).expect("read"),
+            before,
+            "never truncated or overwritten"
+        );
+        let ws = Workspace::open(db.path()).expect("still a valid workspace");
+        assert_eq!(ws.read_receipts().expect("r").len(), 21);
+    }
+
+    #[test]
+    fn cli_ingest_invalid_snapshot_is_error() {
+        let db = TempDb::new("ingest-invalid");
+        let e = ingest_workspace(Path::new("fixtures/snapshots/invalid-net.json"), db.path())
+            .expect_err("invalid snapshot must fail");
+        assert!(e.starts_with("ingest failed:"), "{e}");
+        assert!(
+            !e.contains("snapshot_sha256="),
+            "no success text after an error"
+        );
+        // Existing contract, documented not invented: create() succeeded before
+        // the typed parse refused the snapshot, so an EMPTY workspace file
+        // remains — open() works and every read is NotIngested.
+        assert!(db.path().is_file());
+        let ws = Workspace::open(db.path()).expect("empty workspace opens");
+        assert!(matches!(
+            ws.snapshot_sha256(),
+            Err(WorkspaceError::NotIngested)
+        ));
+        // A missing snapshot file is refused before any workspace is created.
+        let db2 = TempDb::new("ingest-missing-snapshot");
+        let e = ingest_workspace(
+            Path::new("fixtures/snapshots/does-not-exist.json"),
+            db2.path(),
+        )
+        .expect_err("missing snapshot");
+        assert!(e.starts_with("could not read"), "{e}");
+        assert!(
+            !db2.path().exists(),
+            "no workspace file for a missing snapshot"
+        );
+    }
+
+    #[test]
+    fn cli_inspect_workspace_reads_workspace_only() {
+        let db = TempDb::new("inspect");
+        ingest_workspace(Path::new(TESTGARDEN), db.path()).expect("ingest");
+        // From here on only the .duckdb file is consulted.
+        let text = inspect_workspace(db.path()).expect("inspect");
+        assert!(text.contains("workspace_schema=1\n"), "{text}");
+        assert!(
+            text.contains(&format!("snapshot_sha256={TESTGARDEN_DIGEST}\n")),
+            "{text}"
+        );
+        assert!(text.contains("snapshot_schema_version=1.1\n"), "{text}");
+        assert!(text.contains("income_year=2026\n"), "{text}");
+        assert!(
+            !text.contains("display_name="),
+            "no entity name in evidence output: {text}"
+        );
+        assert!(!text.contains("Testgården"), "{text}");
+        assert!(text.contains("properties=2\n"), "{text}");
+        assert!(text.contains("receipts=21\n"), "{text}");
+        assert!(text.contains("income_entries=6\n"), "{text}");
+        assert!(text.contains("audit_items=0\n"), "{text}");
+        let fp = text
+            .lines()
+            .find_map(|l| l.strip_prefix("logical_fingerprint="))
+            .expect("fingerprint line");
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        let ws = Workspace::open(db.path()).expect("reopen");
+        assert_eq!(fp, ws.logical_fingerprint().expect("fp"));
+        // Privacy: nothing from the rows leaks — no org number, vendors, notes.
+        assert!(!text.contains("999999-0006"), "{text}");
+        assert!(!text.contains("Röjarlaget"), "{text}");
+        assert!(!text.contains("Norrskogen AB"), "{text}");
+        assert!(!text.contains("ReceiptRow"), "{text}");
+        assert!(!text.contains("receipt:"), "{text}");
+    }
+
+    #[test]
+    fn cli_inspect_workspace_missing_path_is_error() {
+        let db = TempDb::new("inspect-missing");
+        let e = inspect_workspace(db.path()).expect_err("missing file");
+        assert!(e.contains("does not exist"), "{e}");
+        assert!(!db.path().exists(), "inspect must never create a file");
+    }
+
+    #[test]
+    fn cli_inspect_workspace_empty_is_not_ingested() {
+        let db = TempDb::new("inspect-empty");
+        Workspace::create(db.path())
+            .expect("create")
+            .close()
+            .expect("close");
+        let e = inspect_workspace(db.path()).expect_err("empty workspace");
+        assert!(e.contains("no ingested snapshot"), "{e}");
+    }
+
+    #[test]
+    fn cli_option_parsing_is_strict() {
+        let req = &["--snapshot", "--workspace"];
+        let ok = parse_options(
+            &args(&["--workspace", "w.duckdb", "--snapshot", "s.json"]),
+            req,
+        )
+        .expect("both present, any order");
+        assert_eq!(ok, vec!["s.json".to_string(), "w.duckdb".to_string()]);
+        let e = parse_options(&args(&["--snapshot", "s.json"]), req).expect_err("missing");
+        assert!(e.contains("missing required option --workspace"), "{e}");
+        let e = parse_options(
+            &args(&["--snapshot", "a", "--snapshot", "b", "--workspace", "w"]),
+            req,
+        )
+        .expect_err("duplicate");
+        assert!(e.contains("--snapshot given more than once"), "{e}");
+        let e = parse_options(
+            &args(&["--snapshot", "s", "--workspace", "w", "--force"]),
+            req,
+        )
+        .expect_err("unknown");
+        assert!(e.contains("unknown option --force"), "{e}");
+        let e =
+            parse_options(&args(&["--snapshot", "s", "--workspace"]), req).expect_err("no value");
+        assert!(e.contains("--workspace requires a value"), "{e}");
+        let e = parse_options(&args(&["--snapshot", "--workspace", "w"]), req)
+            .expect_err("value looks like an option");
+        assert!(e.contains("--snapshot requires a value"), "{e}");
+        let e = parse_options(
+            &args(&["--snapshot", "s", "--workspace", "w", "extra"]),
+            req,
+        )
+        .expect_err("positional");
+        assert!(e.contains("unexpected argument extra"), "{e}");
+        let e = parse_options(&args(&[]), &["--workspace"]).expect_err("nothing given");
+        assert!(e.contains("missing required option --workspace"), "{e}");
     }
 }

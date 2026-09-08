@@ -79,3 +79,16 @@ jobs:
             if cargo run --quiet -- inspect-masterdata --root "$root"; then echo "$root loaded but must fail"; exit 1; fi
           done
       - run: uv run --with openpyxl --with pytest pytest tools/tests -q
+
+  security-audit:
+    name: security-audit (cargo-audit on the committed Cargo.lock)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo-audit is CI tooling only — never a project dependency.
+      - run: cargo install cargo-audit --locked
+      # Audits the lockfile exactly as committed. No --ignore, no
+      # continue-on-error: an advisory is a STOP, reported and decided by a human.
+      - run: cargo audit --file Cargo.lock
