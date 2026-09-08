@@ -8,6 +8,7 @@ use codepage_437::{FromCp437, CP437_CONTROL};
 
 pub mod accounts;
 pub mod chart;
+pub mod engine;
 pub mod metadata;
 pub mod money;
 pub mod ruleset;
