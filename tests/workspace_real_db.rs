@@ -8,11 +8,15 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use duckdb::Connection;
 use serde_json::Value;
+use sieverk::engine::{assess_cases, project_cases, run_engine, CaseSource, SourceFacts};
 use sieverk::money::Ore;
+use sieverk::ruleset::load_masterdata;
 use sieverk::snapshot::parse_snapshot;
 use sieverk::workspace::{
-    canonical_snapshot_bytes, IngestOutcome, Workspace, WorkspaceError, SCHEMA_V1_TABLES,
-    WORKSPACE_SCHEMA,
+    canonical_decision_text, canonical_snapshot_bytes, EngineState, IngestOutcome, PersistedCase,
+    PersistedFinding, PersistedLine, RunProvenance, Workspace, WorkspaceError,
+    ENGINE_RUN_META_COLUMNS, SCHEMA_V1_TABLES, SCHEMA_V2_TABLES, WORKSPACE_SCHEMA,
+    WORKSPACE_SCHEMA_ENGINE,
 };
 
 /// A unique path under the OS temp dir; removed before use so each test
@@ -133,7 +137,7 @@ fn schema_mismatch_is_reported_with_both_versions() {
             err,
             WorkspaceError::SchemaMismatch {
                 found: 99,
-                expected: WORKSPACE_SCHEMA
+                expected: WORKSPACE_SCHEMA_ENGINE
             }
         ),
         "{err}"
@@ -1129,4 +1133,1076 @@ fn audit_chain_readback_keeps_document_nulls_and_event_fields() {
     );
     assert_eq!(chain[2].storage_backend.as_deref(), Some("cloudinary"));
     assert!(chain.iter().all(|a| a.property_id == 7));
+}
+
+// ---------------------------------------------------------------------------
+// SV-03 Slice 2 — schema v2, persist_run, readback, digest, verification
+// ---------------------------------------------------------------------------
+
+const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
+
+fn masterdata() -> sieverk::ruleset::Masterdata {
+    load_masterdata(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SYNTHETIC_ROOT))
+        .expect("synthetic masterdata")
+}
+
+fn sql(ws: &Workspace, statement: &str) {
+    ws.connection().execute_batch(statement).expect(statement);
+}
+
+fn count(ws: &Workspace, table: &str) -> i64 {
+    ws.connection()
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        .expect(table)
+}
+
+fn v1_tables() -> Vec<String> {
+    let mut v: Vec<String> = SCHEMA_V1_TABLES.iter().map(|s| s.to_string()).collect();
+    v.sort();
+    v
+}
+
+/// Ingest Testgården and run the engine; returns the open workspace + evidence.
+fn run_testgarden(db: &TempDb) -> (Workspace, sieverk::engine::RunEvidence) {
+    let mut ws = ingest_testgarden(db);
+    let ev = run_engine(&mut ws, &masterdata()).expect("run_engine");
+    (ws, ev)
+}
+
+/// Snapshot of everything schema-v1 that Slice 2 must leave untouched.
+fn v1_state(
+    ws: &Workspace,
+) -> (
+    String,
+    Vec<(String, i64)>,
+    Vec<sieverk::workspace::ReceiptRow>,
+) {
+    (
+        ws.logical_fingerprint().expect("fp"),
+        counts(ws),
+        ws.read_receipts().expect("receipts"),
+    )
+}
+
+// S1 — v1 → v2 preserves every v1 row and the v1 fingerprint
+#[test]
+fn s1_run_preserves_schema_v1_rows_and_fingerprint() {
+    let db = TempDb::new("s1");
+    let mut ws = ingest_testgarden(&db);
+    let before = v1_state(&ws);
+    let meta_before = ws.read_meta().expect("meta");
+    let entity_before = ws.read_entity().expect("entity");
+    assert_eq!(ws.schema_version().expect("schema"), WORKSPACE_SCHEMA);
+    let ev = run_engine(&mut ws, &masterdata()).expect("run");
+    assert_eq!(
+        ws.schema_version().expect("schema"),
+        WORKSPACE_SCHEMA_ENGINE
+    );
+    assert_eq!(v1_state(&ws), before);
+    assert_eq!(ws.read_meta().expect("meta"), meta_before);
+    assert_eq!(ws.read_entity().expect("entity"), entity_before);
+    assert_eq!((ev.cases, ev.findings, ev.lines), (27, ev.findings, 0));
+    let mut expected: Vec<String> = v1_tables();
+    expected.extend(SCHEMA_V2_TABLES.iter().map(|s| s.to_string()));
+    expected.sort();
+    assert_eq!(ws.table_names().expect("tables"), expected);
+}
+
+// S2 — persist + close + reopen + readback + verify
+#[test]
+fn s2_persisted_run_survives_reopen_and_verifies() {
+    let db = TempDb::new("s2");
+    let (ws, ev) = run_testgarden(&db);
+    ws.close().expect("close");
+    let ws = Workspace::open(db.path()).expect("reopen schema 2");
+    assert_eq!(
+        ws.engine_state().expect("state"),
+        EngineState::Run(ev.run.clone())
+    );
+    assert_eq!(ws.read_run_meta().expect("meta"), ev.run);
+    let cases = ws.read_cases().expect("cases");
+    assert_eq!(cases.len(), 27);
+    for (i, c) in cases.iter().enumerate() {
+        assert_eq!(c.case_seq, i as i32);
+    }
+    let findings = ws.read_findings().expect("findings");
+    assert!(findings
+        .windows(2)
+        .all(|w| (w[0].case_seq, w[0].finding_no) < (w[1].case_seq, w[1].finding_no)));
+    assert!(ws.read_decision_lines().expect("lines").is_empty());
+    assert_eq!(ws.verify_run().expect("verify"), ev.run);
+}
+
+// S3 — zero lines by typed readback AND raw SQL; an injected line is Corrupt
+#[test]
+fn s3_zero_decision_lines_and_injected_line_is_corrupt() {
+    let db = TempDb::new("s3");
+    let (ws, _) = run_testgarden(&db);
+    assert!(ws.read_decision_lines().expect("lines").is_empty());
+    assert_eq!(count(&ws, "decision_lines"), 0);
+    sql(
+        &ws,
+        "INSERT INTO decision_lines VALUES (0, 0, '5360', 'expense', 1000, 0)",
+    );
+    let e = ws
+        .verify_run()
+        .expect_err("line must be refused in Slice 2");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("decision_lines")),
+        "{e}"
+    );
+}
+
+// S4 — determinism across two independent workspaces; row mutation ⇒ digest mismatch
+#[test]
+fn s4_two_workspaces_same_rows_and_digest_and_mutation_breaks_digest() {
+    let a = TempDb::new("s4a");
+    let b = TempDb::new("s4b");
+    let (wa, ea) = run_testgarden(&a);
+    let (wb, eb) = run_testgarden(&b);
+    assert_eq!(ea, eb);
+    assert_eq!(wa.read_cases().expect("a"), wb.read_cases().expect("b"));
+    assert_eq!(
+        wa.read_findings().expect("a"),
+        wb.read_findings().expect("b")
+    );
+    assert_eq!(ea.run.decision_sha256.len(), 64);
+    sql(&wb, "UPDATE findings SET message = message || ' (edited)' WHERE case_seq = 0 AND finding_no = 0");
+    let e = wb.verify_run().expect_err("edited row");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("digest")),
+        "{e}"
+    );
+}
+
+// S5 — REAL rollback (H5 erratum): valid rows, provenance.ruleset_status = "bogus"
+#[test]
+fn s5_rollback_via_engine_run_meta_check_leaves_exact_schema_v1_state() {
+    // Source of valid persisted rows: a completed run in another file.
+    let donor = TempDb::new("s5-donor");
+    let (dws, dev) = run_testgarden(&donor);
+    let cases = dws.read_cases().expect("cases");
+    let findings = dws.read_findings().expect("findings");
+
+    let db = TempDb::new("s5");
+    let mut ws = ingest_testgarden(&db);
+    let before = v1_state(&ws);
+    let mut bogus = dev.run.provenance.clone();
+    bogus.ruleset_status = "bogus".to_string();
+    let e = ws
+        .persist_run(&bogus, &cases, &findings)
+        .expect_err("CHECK on engine_run_meta must fail");
+    assert!(matches!(e, WorkspaceError::Duckdb(_)), "{e}");
+    assert_eq!(ws.schema_version().expect("schema"), WORKSPACE_SCHEMA);
+    assert_eq!(
+        ws.table_names().expect("tables"),
+        v1_tables(),
+        "no v2 table survives the rollback"
+    );
+    assert_eq!(v1_state(&ws), before);
+    assert!(matches!(ws.engine_state(), Ok(EngineState::NotRun)));
+    ws.close().expect("close");
+    let mut ws = Workspace::open(db.path()).expect("reopen as schema 1");
+    assert_eq!(ws.schema_version().expect("schema"), WORKSPACE_SCHEMA);
+    // The same workspace can still perform a valid run afterwards.
+    let ev = run_engine(&mut ws, &masterdata()).expect("valid run after rollback");
+    assert_eq!(ev, dev);
+}
+
+// S6 — AlreadyRun: run_engine and direct persist_run
+#[test]
+fn s6_second_run_is_already_run_before_mutation() {
+    let db = TempDb::new("s6");
+    let (mut ws, ev) = run_testgarden(&db);
+    let rows_before = (ws.read_cases().expect("c"), ws.read_findings().expect("f"));
+    let e = run_engine(&mut ws, &masterdata()).expect_err("rerun");
+    assert!(
+        matches!(&e, sieverk::engine::EngineError::Workspace(WorkspaceError::AlreadyRun { decision_sha256 }) if *decision_sha256 == ev.run.decision_sha256),
+        "{e}"
+    );
+    let cases = rows_before.0.clone();
+    let findings = rows_before.1.clone();
+    let e = ws
+        .persist_run(&ev.run.provenance, &cases, &findings)
+        .expect_err("direct rerun");
+    assert!(matches!(e, WorkspaceError::AlreadyRun { .. }), "{e}");
+    assert_eq!(
+        (ws.read_cases().expect("c"), ws.read_findings().expect("f")),
+        rows_before
+    );
+    assert_eq!(ws.verify_run().expect("still valid"), ev.run);
+}
+
+// S7 — schema 2 with zero runs: NotRun for reads, Corrupt for runs; schema 1 reads NotRun; ingest guard
+#[test]
+fn s7_schema2_without_run_is_notrun_for_reads_corrupt_for_runs_and_ingest_refuses() {
+    let db = TempDb::new("s7");
+    let (ws, ev) = run_testgarden(&db);
+    sql(&ws, "DELETE FROM engine_run_meta");
+    ws.close().expect("close");
+    let mut ws = Workspace::open(db.path()).expect("recovery state opens");
+    assert_eq!(ws.engine_state().expect("state"), EngineState::NotRun);
+    assert!(matches!(ws.read_run_meta(), Err(WorkspaceError::NotRun)));
+    assert!(matches!(ws.read_cases(), Err(WorkspaceError::NotRun)));
+    assert!(matches!(ws.read_findings(), Err(WorkspaceError::NotRun)));
+    assert!(matches!(
+        ws.read_decision_lines(),
+        Err(WorkspaceError::NotRun)
+    ));
+    assert!(matches!(ws.verify_run(), Err(WorkspaceError::NotRun)));
+    let e = run_engine(&mut ws, &masterdata()).expect_err("run on recovery container");
+    assert!(
+        matches!(
+            e,
+            sieverk::engine::EngineError::Workspace(WorkspaceError::Corrupt(_))
+        ),
+        "{e}"
+    );
+    let cases = Vec::<PersistedCase>::new();
+    let e = ws
+        .persist_run(&ev.run.provenance, &cases, &[])
+        .expect_err("persist on recovery container");
+    assert!(matches!(e, WorkspaceError::Corrupt(_)), "{e}");
+    // ingest guard on schema 2 with one snapshot: digest comparison only, no write.
+    let fp = ws.logical_fingerprint().expect("fp");
+    let same = ws.ingest(&fixture(TESTGARDEN)).expect("same digest");
+    assert!(matches!(same, IngestOutcome::AlreadyIngested { .. }));
+    let e = ws
+        .ingest(&fixture("minimal-1.1.json"))
+        .expect_err("other snapshot");
+    assert!(matches!(e, WorkspaceError::SnapshotMismatch { .. }), "{e}");
+    assert_eq!(ws.logical_fingerprint().expect("fp"), fp);
+    // schema 1 reads are NotRun.
+    let db1 = TempDb::new("s7-v1");
+    let ws1 = ingest_testgarden(&db1);
+    assert!(matches!(ws1.read_cases(), Err(WorkspaceError::NotRun)));
+    assert_eq!(ws1.engine_state().expect("state"), EngineState::NotRun);
+}
+
+// S7b — schema 2 + zero run + zero snapshot: ingest refuses without mutation (addendum §3)
+#[test]
+fn s7b_schema2_zero_run_zero_snapshot_ingest_refuses_without_mutation() {
+    let db = TempDb::new("s7b");
+    let (ws, _) = run_testgarden(&db);
+    sql(&ws, "DELETE FROM engine_run_meta; DELETE FROM accounting_cases; DELETE FROM findings; \
+              DELETE FROM snapshot_meta; DELETE FROM entity_context; DELETE FROM entity_operations; \
+              DELETE FROM properties; DELETE FROM receipts; DELETE FROM income_entries; DELETE FROM audit_chain");
+    ws.close().expect("close");
+    let mut ws = Workspace::open(db.path()).expect("empty schema-2 container opens");
+    assert_eq!(
+        ws.schema_version().expect("schema"),
+        WORKSPACE_SCHEMA_ENGINE
+    );
+    assert_eq!(ws.snapshot_count().expect("count"), 0);
+    let e = ws.ingest(&fixture(TESTGARDEN)).expect_err("must refuse");
+    assert!(matches!(e, WorkspaceError::Corrupt(_)), "{e}");
+    assert_eq!(ws.snapshot_count().expect("count"), 0);
+    for table in SCHEMA_V1_TABLES.iter().filter(|t| **t != "workspace_meta") {
+        assert_eq!(ws.row_count(table).expect("count"), 0, "{table}");
+    }
+    assert_eq!(
+        ws.schema_version().expect("schema"),
+        WORKSPACE_SCHEMA_ENGINE
+    );
+}
+
+// S8 — >1 run rows (malformed table) and run row without snapshot ⇒ Corrupt on open
+#[test]
+fn s8_malformed_run_table_and_missing_snapshot_are_corrupt_on_open() {
+    let db = TempDb::new("s8");
+    let (ws, ev) = run_testgarden(&db);
+    let p = &ev.run.provenance;
+    let d = &ev.run.decision_sha256;
+    sql(&ws, "DROP TABLE engine_run_meta");
+    sql(&ws, "CREATE TABLE engine_run_meta (run_seq INTEGER, snapshot_sha256 TEXT, engine_version TEXT, chart_id TEXT, \
+              chart_version TEXT, ruleset_version TEXT, ruleset_status TEXT, taxonomy_version TEXT, workbook_sha256 TEXT, \
+              generator_version TEXT, decision_sha256 TEXT)");
+    for seq in [0, 1] {
+        sql(&ws, &format!(
+            "INSERT INTO engine_run_meta VALUES ({seq}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{d}')",
+            p.snapshot_sha256, p.engine_version, p.chart_id, p.chart_version, p.ruleset_version,
+            p.ruleset_status, p.taxonomy_version, p.workbook_sha256, p.generator_version
+        ));
+    }
+    ws.close().expect("close");
+    let e = Workspace::open(db.path()).expect_err("two run rows");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("more than one run row")),
+        "{e}"
+    );
+
+    let db2 = TempDb::new("s8-nosnap");
+    let (ws2, _) = run_testgarden(&db2);
+    sql(&ws2, "DELETE FROM snapshot_meta");
+    ws2.close().expect("close");
+    let e = Workspace::open(db2.path()).expect_err("run without snapshot");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("snapshot_meta")),
+        "{e}"
+    );
+}
+
+// S8b — one malformed run row with run_seq = 1 ⇒ Corrupt on open (blocker 1)
+#[test]
+fn s8b_single_run_row_with_wrong_run_seq_is_corrupt_on_open() {
+    let db = TempDb::new("s8b");
+    let (ws, ev) = run_testgarden(&db);
+    let p = &ev.run.provenance;
+    let d = &ev.run.decision_sha256;
+    sql(&ws, "DROP TABLE engine_run_meta");
+    sql(&ws, "CREATE TABLE engine_run_meta (run_seq INTEGER, snapshot_sha256 TEXT, engine_version TEXT, chart_id TEXT, \
+              chart_version TEXT, ruleset_version TEXT, ruleset_status TEXT, taxonomy_version TEXT, workbook_sha256 TEXT, \
+              generator_version TEXT, decision_sha256 TEXT)");
+    sql(&ws, &format!(
+        "INSERT INTO engine_run_meta VALUES (1, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{d}')",
+        p.snapshot_sha256, p.engine_version, p.chart_id, p.chart_version, p.ruleset_version,
+        p.ruleset_status, p.taxonomy_version, p.workbook_sha256, p.generator_version
+    ));
+    ws.close().expect("close");
+    let e = Workspace::open(db.path()).expect_err("run_seq 1 must be refused");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("run_seq")),
+        "{e}"
+    );
+}
+
+// S9b — ingest() on an already-open workspace with an unsupported schema (blocker 2)
+#[test]
+fn s9b_ingest_refuses_unsupported_schema_before_any_mutation() {
+    let db = TempDb::new("s9b");
+    let mut ws = Workspace::create(db.path()).expect("create");
+    sql(&ws, "UPDATE workspace_meta SET workspace_schema = 3");
+    let before = counts(&ws);
+    assert_eq!(ws.snapshot_count().expect("count"), 0);
+    let e = ws
+        .ingest(&fixture(TESTGARDEN))
+        .expect_err("unsupported schema");
+    assert!(
+        matches!(
+            e,
+            WorkspaceError::SchemaMismatch {
+                found: 3,
+                expected: WORKSPACE_SCHEMA_ENGINE
+            }
+        ),
+        "{e}"
+    );
+    assert_eq!(ws.snapshot_count().expect("count"), 0);
+    assert_eq!(counts(&ws), before);
+    assert_eq!(ws.table_names().expect("tables"), v1_tables());
+}
+
+// S7c — run_engine on both schema-2 recovery forms ⇒ Corrupt (blocker 3)
+#[test]
+fn s7c_run_engine_on_schema2_recovery_states_is_corrupt() {
+    // zero run + one snapshot
+    let db = TempDb::new("s7c-one");
+    let (ws, _) = run_testgarden(&db);
+    sql(&ws, "DELETE FROM engine_run_meta");
+    ws.close().expect("close");
+    let mut ws = Workspace::open(db.path()).expect("recovery opens");
+    assert_eq!(ws.engine_state().expect("state"), EngineState::NotRun);
+    let e = run_engine(&mut ws, &masterdata()).expect_err("must not run");
+    assert!(
+        matches!(
+            e,
+            sieverk::engine::EngineError::Workspace(WorkspaceError::Corrupt(_))
+        ),
+        "{e}"
+    );
+    assert_eq!(ws.engine_state().expect("state"), EngineState::NotRun);
+    assert!(matches!(ws.read_cases(), Err(WorkspaceError::NotRun)));
+    // zero run + zero snapshot
+    let db2 = TempDb::new("s7c-zero");
+    let (ws2, _) = run_testgarden(&db2);
+    sql(&ws2, "DELETE FROM engine_run_meta; DELETE FROM accounting_cases; DELETE FROM findings; \
+               DELETE FROM snapshot_meta; DELETE FROM entity_context; DELETE FROM entity_operations; \
+               DELETE FROM properties; DELETE FROM receipts; DELETE FROM income_entries; DELETE FROM audit_chain");
+    ws2.close().expect("close");
+    let mut ws2 = Workspace::open(db2.path()).expect("empty recovery opens");
+    assert_eq!(ws2.engine_state().expect("state"), EngineState::NotRun);
+    let e = run_engine(&mut ws2, &masterdata()).expect_err("must not run");
+    assert!(
+        matches!(
+            e,
+            sieverk::engine::EngineError::Workspace(WorkspaceError::Corrupt(_))
+        ),
+        "{e}"
+    );
+    assert_eq!(ws2.snapshot_count().expect("count"), 0);
+    assert!(matches!(ws2.read_cases(), Err(WorkspaceError::NotRun)));
+}
+
+// S9 — schema 3 / 0 ⇒ SchemaMismatch { found, expected: 2 }
+#[test]
+fn s9_unsupported_schema_versions_are_mismatch() {
+    for (name, v) in [("s9-3", 3), ("s9-0", 0)] {
+        let db = TempDb::new(name);
+        Workspace::create(db.path())
+            .expect("create")
+            .close()
+            .expect("close");
+        {
+            let raw = Connection::open(db.path()).expect("raw");
+            raw.execute_batch(&format!("UPDATE workspace_meta SET workspace_schema = {v}"))
+                .expect("update");
+            if let Err((_, e)) = raw.close() {
+                panic!("raw close: {e}");
+            }
+        }
+        let e = Workspace::open(db.path()).expect_err("unsupported");
+        assert!(
+            matches!(e, WorkspaceError::SchemaMismatch { found, expected: WORKSPACE_SCHEMA_ENGINE } if found == v),
+            "{e}"
+        );
+    }
+}
+
+// S10 — provenance: exact values, exact 11 columns, no path/time/count; mutation ⇒ Corrupt
+#[test]
+fn s10_provenance_is_content_identity_only_and_bound_by_the_digest() {
+    let db = TempDb::new("s10");
+    let (ws, ev) = run_testgarden(&db);
+    let md = masterdata();
+    let p = &ev.run.provenance;
+    assert_eq!(p.snapshot_sha256, ws.snapshot_sha256().expect("sha"));
+    assert_eq!(p.engine_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        (p.chart_id.as_str(), p.chart_version.as_str()),
+        (md.chart.chart_id.as_str(), md.chart.version.as_str())
+    );
+    assert_eq!(
+        (p.ruleset_version.as_str(), p.ruleset_status.as_str()),
+        (
+            md.ruleset.ruleset_version.as_str(),
+            md.ruleset.review_status.as_str()
+        )
+    );
+    assert_eq!(p.taxonomy_version, md.ruleset.taxonomy_version);
+    assert_eq!(p.workbook_sha256, md.chart.header.workbook_sha256);
+    assert_eq!(p.generator_version, md.chart.header.generator_version);
+    let columns = strings(
+        &ws,
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'main' AND table_name = 'engine_run_meta' ORDER BY ordinal_position",
+    );
+    assert_eq!(
+        columns,
+        ENGINE_RUN_META_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    );
+    for forbidden in [
+        "run_at",
+        "masterdata_root",
+        "path",
+        "case_count",
+        "finding_count",
+    ] {
+        assert!(!columns.iter().any(|c| c == forbidden), "{forbidden}");
+    }
+    sql(&ws, "UPDATE engine_run_meta SET ruleset_version = '9.9'");
+    let e = ws.verify_run().expect_err("provenance mutation");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("digest")),
+        "{e}"
+    );
+}
+
+// S11 — Testgården counts and structural references persisted
+#[test]
+fn s11_testgarden_persisted_counts_references_and_types() {
+    let db = TempDb::new("s11");
+    let (ws, _) = run_testgarden(&db);
+    let cases = ws.read_cases().expect("cases");
+    let findings = ws.read_findings().expect("findings");
+    assert_eq!(cases.iter().filter(|c| c.source == "receipt").count(), 21);
+    assert_eq!(cases.iter().filter(|c| c.source == "income").count(), 6);
+    let unmapped = |seq: i32| {
+        findings
+            .iter()
+            .any(|f| f.case_seq == seq && f.code == "UNMAPPED_CATEGORY")
+    };
+    assert_eq!(
+        cases
+            .iter()
+            .filter(|c| c.source == "receipt" && unmapped(c.case_seq))
+            .count(),
+        17
+    );
+    assert_eq!(
+        cases
+            .iter()
+            .filter(|c| c.source == "income" && unmapped(c.case_seq))
+            .count(),
+        3
+    );
+    let annat = cases
+        .iter()
+        .find(|c| c.subject.as_deref() == Some("Annat / osäkert"))
+        .expect("row");
+    assert_eq!(annat.rule_case_id.as_deref(), Some("annat_osakert.default"));
+    assert!(unmapped(annat.case_seq));
+    assert_eq!(annat.status, "Manual");
+    let unknown = cases
+        .iter()
+        .find(|c| c.payment_method.as_deref() == Some("unknown"))
+        .expect("row");
+    assert_eq!(
+        (
+            unknown.counter_source.as_deref(),
+            unknown.counter_key.as_deref(),
+            unknown.counter_bookkeeping_method.as_deref()
+        ),
+        (Some("receipt"), Some("unknown"), None)
+    );
+    assert_eq!(unknown.status, "Manual");
+    assert!(cases
+        .iter()
+        .filter(|c| c.source == "income")
+        .all(|c| c.counter_source.is_none()
+            && c.counter_key.is_none()
+            && c.counter_bookkeeping_method.is_none()));
+    assert!(findings
+        .iter()
+        .all(|f| f.code != "UNRESOLVED_VAT" && f.code != "VAT_MISMATCH"));
+    assert!(cases
+        .iter()
+        .filter(|c| c.source == "receipt")
+        .all(|c| c.has_image == Some(false)));
+    assert!(cases
+        .iter()
+        .filter(|c| c.source == "income")
+        .all(|c| c.document_count == Some(0)));
+    assert!(cases
+        .iter()
+        .filter(|c| c.source == "income")
+        .all(|c| c.requires_business_share.is_none() && c.subject == c.income_type));
+    assert!(cases.iter().filter(|c| c.source == "receipt").all(|c| c
+        .requires_business_share
+        .is_some()
+        && c.entry_type.as_deref() == Some("expense")
+        && c.area.is_some()));
+    assert_eq!(count(&ws, "decision_lines"), 0);
+    assert_eq!(
+        one_string(&ws, "SELECT typeof(date) FROM accounting_cases LIMIT 1"),
+        "DATE"
+    );
+    assert_eq!(
+        one_string(
+            &ws,
+            "SELECT typeof(payment_date) FROM accounting_cases WHERE source = 'income' LIMIT 1"
+        ),
+        "DATE"
+    );
+    assert_eq!(
+        one_string(
+            &ws,
+            "SELECT typeof(total_ore) FROM accounting_cases WHERE source = 'receipt' LIMIT 1"
+        ),
+        "BIGINT"
+    );
+    assert_eq!(
+        one_string(
+            &ws,
+            "SELECT typeof(has_image) FROM accounting_cases WHERE source = 'receipt' LIMIT 1"
+        ),
+        "BOOLEAN"
+    );
+    assert_eq!(one_i64(&ws, "SELECT count(*) FROM findings WHERE code = 'MISSING_EVIDENCE' AND severity = 'warning'"), 27);
+}
+
+// S12 — schema 1.0: derived canonical keys persisted and verified
+#[test]
+fn s12_schema_1_0_run_persists_derived_keys_and_verifies() {
+    let db = TempDb::new("s12");
+    let mut ws = Workspace::create(db.path()).expect("create");
+    ws.ingest(&fixture("minimal-1.0.json")).expect("ingest 1.0");
+    let ev = run_engine(&mut ws, &masterdata()).expect("run");
+    let cases = ws.read_cases().expect("cases");
+    assert_eq!(cases.len(), ev.cases);
+    for c in &cases {
+        assert_eq!(c.source_key, format!("{}:{}", c.source, c.row_id));
+        assert!(
+            c.requires_business_share.is_none()
+                && c.investment_risk.is_none()
+                && c.vat_check.is_none()
+                && c.sensitive.is_none()
+        );
+    }
+    assert!(cases
+        .iter()
+        .filter(|c| c.source == "receipt")
+        .all(|c| c.payment_method.is_none() && c.counter_source.is_none()));
+    assert_eq!(ws.verify_run().expect("verify"), ev.run);
+}
+
+// S13 — lossless round-trip via public API only
+#[test]
+fn s13_public_api_round_trip_is_lossless() {
+    let db = TempDb::new("s13");
+    let mut ws = ingest_testgarden(&db);
+    let md = masterdata();
+    let entity = ws.read_entity().expect("entity");
+    let engine_cases = project_cases(&ws).expect("project");
+    let assessments = assess_cases(&engine_cases, &entity, &md).expect("assess");
+    run_engine(&mut ws, &md).expect("run");
+    let persisted = ws.read_cases().expect("cases");
+    let findings = ws.read_findings().expect("findings");
+    assert_eq!(persisted.len(), engine_cases.len());
+    for ((ec, a), pc) in engine_cases.iter().zip(&assessments).zip(&persisted) {
+        assert_eq!(pc.case_seq, ec.case_seq);
+        assert_eq!(
+            pc.source,
+            match ec.source {
+                CaseSource::Receipt => "receipt",
+                CaseSource::Income => "income",
+            }
+        );
+        assert_eq!(
+            (
+                pc.source_key.as_str(),
+                pc.row_id,
+                pc.property_id,
+                pc.ordinal_number,
+                pc.date
+            ),
+            (
+                ec.source_key.as_str(),
+                ec.row_id,
+                ec.property_id,
+                ec.ordinal_number,
+                ec.date
+            )
+        );
+        assert_eq!(pc.subject, ec.subject);
+        assert_eq!(
+            (
+                pc.requires_business_share,
+                pc.investment_risk,
+                pc.vat_check,
+                pc.sensitive
+            ),
+            (
+                ec.context.requires_business_share,
+                ec.context.investment_risk,
+                ec.context.vat_check,
+                ec.context.sensitive
+            )
+        );
+        match &ec.facts {
+            SourceFacts::Receipt {
+                total,
+                vat,
+                rounding,
+                net,
+                payment_method,
+                entry_type,
+                area,
+                has_image,
+            } => {
+                assert_eq!(
+                    (pc.total, pc.receipt_vat, pc.rounding, pc.net),
+                    (Some(*total), Some(*vat), Some(*rounding), Some(*net))
+                );
+                assert_eq!(
+                    (
+                        &pc.payment_method,
+                        pc.entry_type.as_deref(),
+                        pc.area.as_deref(),
+                        pc.has_image
+                    ),
+                    (
+                        payment_method,
+                        Some(entry_type.as_str()),
+                        Some(area.as_str()),
+                        Some(*has_image)
+                    )
+                );
+                assert!(
+                    pc.ex_vat.is_none()
+                        && pc.income_type.is_none()
+                        && pc.document_count.is_none()
+                        && pc.payment_date.is_none()
+                );
+            }
+            SourceFacts::Income {
+                ex_vat,
+                vat,
+                inc_vat,
+                payment_date,
+                income_type,
+                document_count,
+            } => {
+                assert_eq!(
+                    (pc.ex_vat, pc.income_vat, pc.inc_vat, pc.payment_date),
+                    (Some(*ex_vat), Some(*vat), Some(*inc_vat), *payment_date)
+                );
+                assert_eq!(
+                    (pc.income_type.as_deref(), pc.document_count),
+                    (Some(income_type.as_str()), Some(*document_count))
+                );
+                assert!(pc.total.is_none() && pc.entry_type.is_none() && pc.has_image.is_none());
+            }
+        }
+        assert_eq!(
+            (&pc.rule_case_id, &pc.vat_rule_id),
+            (&a.rule_case_id, &a.vat_rule_id)
+        );
+        match &a.counter_rule {
+            Some(r) => {
+                assert_eq!(
+                    pc.counter_source.as_deref(),
+                    Some(match r.source {
+                        CaseSource::Receipt => "receipt",
+                        CaseSource::Income => "income",
+                    })
+                );
+                assert_eq!(pc.counter_key.as_deref(), Some(r.key.as_str()));
+                assert_eq!(pc.counter_bookkeeping_method, r.bookkeeping_method);
+            }
+            None => assert!(
+                pc.counter_source.is_none()
+                    && pc.counter_key.is_none()
+                    && pc.counter_bookkeeping_method.is_none()
+            ),
+        }
+        assert_eq!(pc.status, format!("{:?}", a.status_ceiling));
+        let mine: Vec<&PersistedFinding> = findings
+            .iter()
+            .filter(|f| f.case_seq == ec.case_seq)
+            .collect();
+        assert_eq!(mine.len(), a.findings.len());
+        for (pf, f) in mine.iter().zip(&a.findings) {
+            assert_eq!(
+                (pf.finding_no, pf.code.as_str()),
+                (f.finding_no, f.code.as_str())
+            );
+            assert_eq!(pf.severity, format!("{:?}", f.severity).to_lowercase());
+            assert_eq!((&pf.message, &pf.question), (&f.message, &f.question));
+        }
+    }
+}
+
+// S14 — canonical digest vector: exact literal + DuckDB hash + sensitivity
+#[test]
+fn s14_canonical_decision_text_matches_the_locked_vector() {
+    let db = TempDb::new("s14");
+    let ws = Workspace::create(db.path()).expect("create");
+    let prov = RunProvenance {
+        snapshot_sha256: "snap-sha".to_string(),
+        engine_version: "9.9.9".to_string(),
+        chart_id: "CHART".to_string(),
+        chart_version: "2026.1".to_string(),
+        ruleset_version: "2026.1".to_string(),
+        ruleset_status: "draft".to_string(),
+        taxonomy_version: "1.0".to_string(),
+        workbook_sha256: "wb-sha".to_string(),
+        generator_version: "gen/1".to_string(),
+    };
+    let case = PersistedCase {
+        case_seq: 0,
+        source: "receipt".to_string(),
+        source_key: "receipt:7".to_string(),
+        row_id: 7,
+        property_id: 1,
+        ordinal_number: Some(3),
+        date: date("2026-08-20"),
+        subject: Some("Grus \"och\" \\ material\nrad".to_string()),
+        requires_business_share: None,
+        investment_risk: Some(true),
+        vat_check: None,
+        sensitive: Some(false),
+        total: Some(Ore(125_000)),
+        receipt_vat: Some(Ore(25_000)),
+        rounding: Some(Ore(-20)),
+        net: Some(Ore(100_020)),
+        payment_method: Some("unknown".to_string()),
+        entry_type: Some("expense".to_string()),
+        area: Some("ovrigt".to_string()),
+        has_image: Some(false),
+        ex_vat: None,
+        income_vat: None,
+        inc_vat: None,
+        payment_date: None,
+        income_type: None,
+        document_count: None,
+        rule_case_id: Some("grus_och_material.default".to_string()),
+        vat_rule_id: Some("ing25".to_string()),
+        counter_source: Some("receipt".to_string()),
+        counter_key: Some("unknown".to_string()),
+        counter_bookkeeping_method: None,
+        status: "Manual".to_string(),
+    };
+    let finding = PersistedFinding {
+        case_seq: 0,
+        finding_no: 0,
+        code: "UNRESOLVED_COUNTER_ACCOUNT".to_string(),
+        severity: "blocking".to_string(),
+        message: "åäö \"q\" \\ end".to_string(),
+        question: None,
+    };
+    let text = canonical_decision_text(
+        &prov,
+        std::slice::from_ref(&case),
+        std::slice::from_ref(&finding),
+        &[],
+    );
+    let expected: &str = "sieverk-decision/1\nrun\ti:0\ts:\"snap-sha\"\ts:\"9.9.9\"\ts:\"CHART\"\ts:\"2026.1\"\ts:\"2026.1\"\ts:\"draft\"\ts:\"1.0\"\ts:\"wb-sha\"\ts:\"gen/1\"\ncase\ti:0\ts:\"receipt\"\ts:\"receipt:7\"\ti:7\ti:1\ti:3\td:2026-08-20\ts:\"Grus \\\"och\\\" \\\\ material\\nrad\"\t~\tb:1\t~\tb:0\ti:125000\ti:25000\ti:-20\ti:100020\ts:\"unknown\"\ts:\"expense\"\ts:\"ovrigt\"\tb:0\t~\t~\t~\t~\t~\t~\ts:\"grus_och_material.default\"\ts:\"ing25\"\ts:\"receipt\"\ts:\"unknown\"\t~\ts:\"Manual\"\nfinding\ti:0\ti:0\ts:\"UNRESOLVED_COUNTER_ACCOUNT\"\ts:\"blocking\"\ts:\"åäö \\\"q\\\" \\\\ end\"\t~\nend\ti:1\ti:1\ti:0\n";
+    assert_eq!(String::from_utf8(text.clone()).expect("utf8"), expected);
+    let digest = ws
+        .decision_digest(
+            &prov,
+            std::slice::from_ref(&case),
+            std::slice::from_ref(&finding),
+            &[],
+        )
+        .expect("digest");
+    assert_eq!(
+        digest,
+        "36dd4b0277f06ed642dbdc8b220a304afbe2bb9cec67ce3cfea7c89f051888fc"
+    );
+    assert_eq!(digest, ws.sha256_hex(&text).expect("hash"));
+    let mut other_prov = prov.clone();
+    other_prov.ruleset_version = "2026.2".to_string();
+    assert_ne!(
+        ws.decision_digest(
+            &other_prov,
+            std::slice::from_ref(&case),
+            std::slice::from_ref(&finding),
+            &[]
+        )
+        .expect("d"),
+        digest
+    );
+    let mut other_case = case.clone();
+    other_case.net = Some(Ore(100_021));
+    assert_ne!(
+        ws.decision_digest(
+            &prov,
+            std::slice::from_ref(&other_case),
+            std::slice::from_ref(&finding),
+            &[]
+        )
+        .expect("d"),
+        digest
+    );
+    let line = PersistedLine {
+        case_seq: 0,
+        line_no: 0,
+        account: "5360".to_string(),
+        role: "expense".to_string(),
+        debit: Ore(1),
+        credit: Ore(0),
+    };
+    assert_ne!(
+        ws.decision_digest(
+            &prov,
+            std::slice::from_ref(&case),
+            std::slice::from_ref(&finding),
+            std::slice::from_ref(&line)
+        )
+        .expect("d"),
+        digest
+    );
+}
+
+// S15 — source-mirror mutations after a run are refused before the digest step
+#[test]
+fn s15_source_mirror_mutations_are_corrupt_before_digest() {
+    for (name, statement) in [
+        ("s15-date", "UPDATE accounting_cases SET date = DATE '2000-01-01' WHERE case_seq = 0"),
+        ("s15-net", "UPDATE accounting_cases SET net_ore = net_ore + 1 WHERE case_seq = 0"),
+        ("s15-entry", "UPDATE accounting_cases SET entry_type = 'income' WHERE case_seq = 0"),
+        ("s15-income", "UPDATE accounting_cases SET income_type = 'grot', subject = 'grot' WHERE case_seq = 21"),
+    ] {
+        let db = TempDb::new(name);
+        let (ws, _) = run_testgarden(&db);
+        sql(&ws, statement);
+        let e = ws.verify_run().expect_err(statement);
+        assert!(matches!(&e, WorkspaceError::Corrupt(m) if m.contains("mirror")), "{name}: {e}");
+    }
+    // The same guard runs on persist_run input: a hand-altered case is refused before any mutation.
+    let donor = TempDb::new("s15-donor");
+    let (dws, dev) = run_testgarden(&donor);
+    let mut cases = dws.read_cases().expect("cases");
+    let findings = dws.read_findings().expect("findings");
+    cases[0].net = cases[0].net.map(|o| Ore(o.0 + 1));
+    let db = TempDb::new("s15-preflight");
+    let mut ws = ingest_testgarden(&db);
+    let e = ws
+        .persist_run(&dev.run.provenance, &cases, &findings)
+        .expect_err("altered net");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("mirror")),
+        "{e}"
+    );
+    assert_eq!(ws.schema_version().expect("schema"), WORKSPACE_SCHEMA);
+    assert_eq!(ws.table_names().expect("tables"), v1_tables());
+}
+
+// S16 — persist_run input guards (addendum §2 + Rev-2 §E.2) all refuse before mutation
+#[test]
+fn s16_persist_run_preflight_refuses_every_structural_violation() {
+    let donor = TempDb::new("s16-donor");
+    let (dws, dev) = run_testgarden(&donor);
+    let good_cases = dws.read_cases().expect("cases");
+    let good_findings = dws.read_findings().expect("findings");
+    let prov = dev.run.provenance.clone();
+    // A blocking finding exists on case 0 (Testgården receipt 0 is unmapped) — locate one warning-only case (Bränsle).
+    let bransle = good_cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row") as i32;
+    let unknown = good_cases
+        .iter()
+        .position(|c| c.payment_method.as_deref() == Some("unknown"))
+        .expect("row") as i32;
+
+    type Mutation =
+        Box<dyn Fn(&mut Vec<PersistedCase>, &mut Vec<PersistedFinding>, &mut RunProvenance)>;
+    fn m(
+        f: impl Fn(&mut Vec<PersistedCase>, &mut Vec<PersistedFinding>, &mut RunProvenance) + 'static,
+    ) -> Mutation {
+        Box::new(f)
+    }
+    let scenarios: Vec<(&str, Mutation)> = vec![
+        ("non-dense case_seq", m(|c, _, _| c[5].case_seq = 99)),
+        ("findings out of order", m(|_, f, _| f.swap(0, 1))),
+        ("orphan finding", m(|_, f, _| f[0].case_seq = 999)),
+        (
+            "Automatic under draft",
+            m(move |c, _, _| c[bransle as usize].status = "Automatic".to_string()),
+        ),
+        (
+            "wrong provenance snapshot",
+            m(|_, _, p| p.snapshot_sha256 = "0".repeat(64)),
+        ),
+        (
+            "income counter reference",
+            m(|c, _, _| {
+                let i = c.iter().position(|x| x.source == "income").expect("income");
+                c[i].counter_source = Some("income".to_string());
+                c[i].counter_key = Some("betald".to_string());
+            }),
+        ),
+        (
+            "VAT finding in Slice 2",
+            m(move |_, f, _| {
+                f.retain(|x| x.case_seq != bransle);
+                f.push(PersistedFinding {
+                    case_seq: bransle,
+                    finding_no: 0,
+                    code: "UNRESOLVED_VAT".to_string(),
+                    severity: "blocking".to_string(),
+                    message: "x".to_string(),
+                    question: None,
+                });
+                f.sort_by_key(|x| (x.case_seq, x.finding_no));
+            }),
+        ),
+        (
+            "wrong severity",
+            m(|_, f, _| {
+                let i = f
+                    .iter()
+                    .position(|x| x.code == "MISSING_EVIDENCE")
+                    .expect("me");
+                f[i].severity = "blocking".to_string();
+            }),
+        ),
+        (
+            "rank order violated",
+            m(move |_, f, _| {
+                // unknown receipt: [COUNTER, UNMAPPED, MISSING] → swap the first two codes keeping numbering dense
+                let i = f
+                    .iter()
+                    .position(|x| x.case_seq == unknown && x.finding_no == 0)
+                    .expect("f0");
+                let code0 = f[i].code.clone();
+                let sev0 = f[i].severity.clone();
+                f[i].code = f[i + 1].code.clone();
+                f[i].severity = f[i + 1].severity.clone();
+                f[i + 1].code = code0;
+                f[i + 1].severity = sev0;
+            }),
+        ),
+        (
+            "duplicate finding code",
+            m(move |_, f, _| {
+                let i = f
+                    .iter()
+                    .position(|x| x.case_seq == unknown && x.finding_no == 1)
+                    .expect("f1");
+                f[i].code = "UNRESOLVED_COUNTER_ACCOUNT".to_string();
+                f[i].severity = "blocking".to_string();
+            }),
+        ),
+        (
+            "Blocking finding with non-Manual status",
+            m(move |c, _, _| c[unknown as usize].status = "Conditional".to_string()),
+        ),
+        (
+            "vat_rule_id without rule_case_id",
+            m(move |c, _, _| c[bransle as usize].rule_case_id = None),
+        ),
+        (
+            "counter key != payment_method",
+            m(move |c, _, _| c[bransle as usize].counter_key = Some("private".to_string())),
+        ),
+        (
+            "partial counter reference",
+            m(move |c, _, _| c[bransle as usize].counter_key = None),
+        ),
+        (
+            "counter without payment_method",
+            m(move |c, _, _| c[bransle as usize].payment_method = None),
+        ),
+        (
+            "subject != income_type",
+            m(|c, _, _| {
+                let i = c.iter().position(|x| x.source == "income").expect("income");
+                c[i].subject = Some("other".to_string());
+            }),
+        ),
+    ];
+    for (name, mutate) in scenarios {
+        let db = TempDb::new(&format!("s16-{}", name.replace(' ', "-")));
+        let mut ws = ingest_testgarden(&db);
+        let fp = ws.logical_fingerprint().expect("fp");
+        let (mut c, mut f, mut p) = (good_cases.clone(), good_findings.clone(), prov.clone());
+        mutate(&mut c, &mut f, &mut p);
+        let e = ws.persist_run(&p, &c, &f).expect_err(name);
+        assert!(matches!(e, WorkspaceError::Corrupt(_)), "{name}: {e}");
+        assert_eq!(
+            ws.schema_version().expect("schema"),
+            WORKSPACE_SCHEMA,
+            "{name}"
+        );
+        assert_eq!(ws.table_names().expect("tables"), v1_tables(), "{name}");
+        assert_eq!(ws.logical_fingerprint().expect("fp"), fp, "{name}");
+    }
+}
+
+// S17 — post-run raw mutations of the structural contract are Corrupt before digest acceptance
+#[test]
+fn s17_post_run_structural_mutations_are_corrupt() {
+    let scenarios = [
+        ("s17-vat-code", "UPDATE findings SET code = 'UNRESOLVED_VAT' WHERE case_seq = 0 AND finding_no = 0", "not allowed in a Slice-2 run"),
+        ("s17-severity", "UPDATE findings SET severity = 'blocking' WHERE code = 'MISSING_EVIDENCE' AND case_seq = 1", "must have severity"),
+        ("s17-dup", "UPDATE findings SET code = 'MISSING_EVIDENCE', severity = 'warning' WHERE case_seq = 0 AND finding_no = 0", "duplicate code"),
+        ("s17-status", "UPDATE accounting_cases SET status = 'Conditional' WHERE case_seq = 0", "blocking finding but status"),
+        ("s17-vatref", "UPDATE accounting_cases SET rule_case_id = NULL WHERE subject = 'Bränsle'", "vat_rule_id without rule_case_id"),
+        ("s17-counterkey", "UPDATE accounting_cases SET counter_key = 'private' WHERE subject = 'Bränsle'", "counter_key"),
+    ];
+    for (name, statement, reason) in scenarios {
+        let db = TempDb::new(name);
+        let (ws, _) = run_testgarden(&db);
+        sql(&ws, statement);
+        let e = ws.verify_run().expect_err(statement);
+        assert!(
+            matches!(&e, WorkspaceError::Corrupt(m) if m.contains(reason)),
+            "{name}: {e}"
+        );
+    }
 }

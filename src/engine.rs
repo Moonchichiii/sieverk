@@ -14,6 +14,10 @@
 //!   status ceiling. Zero accounting lines. No VAT findings (E1 is not
 //!   IMPLEMENTABLE). No E1–E6. No persistence, no CLI, no SIE.
 //!
+//! Slice 2 adds `run_engine`: the same projection + assessment, mapped
+//! losslessly to the workspace's persisted rows and written through
+//! `Workspace::persist_run` (one transaction, schema v2, zero lines).
+//!
 //! Money stays `Ore(i64)`; every check uses checked i64 arithmetic. Nothing
 //! here ever reads the snapshot JSON again.
 
@@ -24,7 +28,10 @@ use chrono::NaiveDate;
 
 use crate::money::Ore;
 use crate::ruleset::{AccountingCase as RuleCase, CounterRule, Masterdata};
-use crate::workspace::{EntityContext, Workspace, WorkspaceError};
+use crate::workspace::{
+    EngineState, EntityContext, PersistedCase, PersistedFinding, RunMeta, RunProvenance, Workspace,
+    WorkspaceError, WORKSPACE_SCHEMA_ENGINE,
+};
 
 // ---------------------------------------------------------------------------
 // Domain types (locked shape)
@@ -175,6 +182,26 @@ pub enum Severity {
     Info,
     Warning,
     Blocking,
+}
+
+impl Severity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Blocking => "blocking",
+        }
+    }
+}
+
+impl DecisionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::Conditional => "Conditional",
+            Self::Manual => "Manual",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,4 +754,175 @@ pub fn assess_cases(
     }
 
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 — run_engine: project → assess → persist (zero lines)
+// ---------------------------------------------------------------------------
+
+/// What a completed run produced. `lines` is always 0 in Slice 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEvidence {
+    pub run: RunMeta,
+    pub cases: usize,
+    pub findings: usize,
+    pub lines: usize,
+}
+
+/// Lossless mapping from the Slice-1 types to the persisted row shapes.
+/// One `PersistedCase` per `EngineCase`, one `PersistedFinding` per
+/// `Finding`, in the order given. Nothing is computed here.
+fn to_persisted(
+    cases: &[EngineCase],
+    assessments: &[CaseAssessment],
+) -> (Vec<PersistedCase>, Vec<PersistedFinding>) {
+    let mut rows = Vec::with_capacity(cases.len());
+    let mut findings = Vec::new();
+    for (case, a) in cases.iter().zip(assessments) {
+        let (source, subject) = match case.source {
+            CaseSource::Receipt => ("receipt", case.subject.clone()),
+            CaseSource::Income => ("income", case.subject.clone()),
+        };
+        let mut row = PersistedCase {
+            case_seq: case.case_seq,
+            source: source.to_string(),
+            source_key: case.source_key.clone(),
+            row_id: case.row_id,
+            property_id: case.property_id,
+            ordinal_number: case.ordinal_number,
+            date: case.date,
+            subject,
+            requires_business_share: case.context.requires_business_share,
+            investment_risk: case.context.investment_risk,
+            vat_check: case.context.vat_check,
+            sensitive: case.context.sensitive,
+            total: None,
+            receipt_vat: None,
+            rounding: None,
+            net: None,
+            payment_method: None,
+            entry_type: None,
+            area: None,
+            has_image: None,
+            ex_vat: None,
+            income_vat: None,
+            inc_vat: None,
+            payment_date: None,
+            income_type: None,
+            document_count: None,
+            rule_case_id: a.rule_case_id.clone(),
+            vat_rule_id: a.vat_rule_id.clone(),
+            counter_source: a.counter_rule.as_ref().map(|r| match r.source {
+                CaseSource::Receipt => "receipt".to_string(),
+                CaseSource::Income => "income".to_string(),
+            }),
+            counter_key: a.counter_rule.as_ref().map(|r| r.key.clone()),
+            counter_bookkeeping_method: a
+                .counter_rule
+                .as_ref()
+                .and_then(|r| r.bookkeeping_method.clone()),
+            status: a.status_ceiling.as_str().to_string(),
+        };
+        match &case.facts {
+            SourceFacts::Receipt {
+                total,
+                vat,
+                rounding,
+                net,
+                payment_method,
+                entry_type,
+                area,
+                has_image,
+            } => {
+                row.total = Some(*total);
+                row.receipt_vat = Some(*vat);
+                row.rounding = Some(*rounding);
+                row.net = Some(*net);
+                row.payment_method = payment_method.clone();
+                row.entry_type = Some(entry_type.clone());
+                row.area = Some(area.clone());
+                row.has_image = Some(*has_image);
+            }
+            SourceFacts::Income {
+                ex_vat,
+                vat,
+                inc_vat,
+                payment_date,
+                income_type,
+                document_count,
+            } => {
+                row.ex_vat = Some(*ex_vat);
+                row.income_vat = Some(*vat);
+                row.inc_vat = Some(*inc_vat);
+                row.payment_date = *payment_date;
+                row.income_type = Some(income_type.clone());
+                row.document_count = Some(*document_count);
+            }
+        }
+        rows.push(row);
+        for f in &a.findings {
+            findings.push(PersistedFinding {
+                case_seq: a.case_seq,
+                finding_no: f.finding_no,
+                code: f.code.as_str().to_string(),
+                severity: f.severity.as_str().to_string(),
+                message: f.message.clone(),
+                question: f.question.clone(),
+            });
+        }
+    }
+    (rows, findings)
+}
+
+/// Content identity of this run: the workspace's snapshot digest, this
+/// binary's version and the loaded masterdata's headers. No clock, no path.
+fn provenance_from(masterdata: &Masterdata, snapshot_sha256: String) -> RunProvenance {
+    RunProvenance {
+        snapshot_sha256,
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        chart_id: masterdata.chart.chart_id.clone(),
+        chart_version: masterdata.chart.version.clone(),
+        ruleset_version: masterdata.ruleset.ruleset_version.clone(),
+        ruleset_status: masterdata.ruleset.review_status.clone(),
+        taxonomy_version: masterdata.ruleset.taxonomy_version.clone(),
+        workbook_sha256: masterdata.chart.header.workbook_sha256.clone(),
+        generator_version: masterdata.chart.header.generator_version.clone(),
+    }
+}
+
+/// One engine run on a workspace: refuse a rerun, project, assess, map
+/// losslessly, persist through `Workspace::persist_run` (which re-checks
+/// every precondition itself). Zero accounting lines in Slice 2.
+pub fn run_engine(
+    workspace: &mut Workspace,
+    masterdata: &Masterdata,
+) -> Result<RunEvidence, EngineError> {
+    match workspace.engine_state()? {
+        EngineState::Run(meta) => {
+            return Err(EngineError::Workspace(WorkspaceError::AlreadyRun {
+                decision_sha256: meta.decision_sha256,
+            }));
+        }
+        EngineState::NotRun => {
+            // A schema-2 container without a run row is a recovery state:
+            // readable (NotRun), never runnable — only schema 1 may proceed.
+            if workspace.schema_version()? == WORKSPACE_SCHEMA_ENGINE {
+                return Err(EngineError::Workspace(WorkspaceError::Corrupt(
+                    "schema 2 workspace without a run row cannot receive a run".to_string(),
+                )));
+            }
+        }
+    }
+    let entity = workspace.read_entity()?;
+    let cases = project_cases(workspace)?;
+    let assessments = assess_cases(&cases, &entity, masterdata)?;
+    let (rows, findings) = to_persisted(&cases, &assessments);
+    let provenance = provenance_from(masterdata, workspace.snapshot_sha256()?);
+    let run = workspace.persist_run(&provenance, &rows, &findings)?;
+    Ok(RunEvidence {
+        run,
+        cases: rows.len(),
+        findings: findings.len(),
+        lines: 0,
+    })
 }
