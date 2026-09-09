@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use sieverk::engine::{
-    assess_cases, project_cases, CaseSource, CounterRuleRef, DecisionStatus, EngineCase,
-    EngineError, FindingCode, Severity, SourceFacts,
+    assess_cases, decide_cases, project_cases, AccountingDecision, CaseSource, CounterRuleRef,
+    DecisionStatus, EngineCase, EngineError, FindingCode, LineRole, Severity, SourceFacts,
 };
 use sieverk::money::Ore;
 use sieverk::ruleset::{load_masterdata, Masterdata};
-use sieverk::workspace::Workspace;
+use sieverk::workspace::{EntityContext, Workspace};
 
 const TESTGARDEN: &str = "fixtures/snapshots/testgarden-2026-1.1.json";
 const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
@@ -537,29 +537,44 @@ fn h7_status_ceiling_is_the_least_confident_input() {
 }
 
 // ---------------------------------------------------------------------------
-// H8 / H16 — zero lines, no floats (source scans of the production module)
+// H8 / H16 — no floats, no invented accounts; lines only through the locked path
+// (contract update at the Slice-3 FINAL lock: ProposedLine now exists)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn h8_h16_engine_source_has_no_lines_and_no_floats() {
+fn h8_h16_engine_source_has_no_floats_and_no_invented_accounts() {
     let src = fs::read_to_string(repo("src/engine.rs")).expect("engine.rs");
-    assert!(
-        !src.contains("ProposedLine"),
-        "Slice 1 defines and constructs no lines"
-    );
-    assert!(!src.contains("LineRole"));
-    assert!(!src.contains("AccountingDecision"));
     for token in ["f32", "f64", "as f32", "as f64"] {
         assert!(
             !src.contains(token),
             "no floats in the production path: {token}"
         );
     }
-    // No E1–E6 behaviour: the engine never touches VAT rules or rates.
-    assert!(!src.contains("vat_account"));
-    assert!(!src.contains("rates"));
-    assert!(!src.contains("3740"));
-    assert!(!src.contains("1930"));
+    // No account number is ever written into the engine: every line account
+    // comes from masterdata (rule case, VAT rule, counter row).
+    for literal in [
+        "\"1930\"", "\"2640\"", "\"3740\"", "\"5360\"", "\"4470\"", "\"2440\"",
+    ] {
+        assert!(!src.contains(literal), "{literal} must not be hard-coded");
+    }
+    // Lines are constructed in exactly one place (the E2 three-line block).
+    assert_eq!(src.matches("role: LineRole::Expense").count(), 1);
+    assert_eq!(src.matches("role: LineRole::InputVat").count(), 1);
+    assert_eq!(src.matches("role: LineRole::Counter").count(), 1);
+    assert_eq!(
+        src.matches("role: LineRole::Rounding").count(),
+        0,
+        "E3 is not implemented"
+    );
+    assert_eq!(
+        src.matches("role: LineRole::Income").count(),
+        0,
+        "income lines are not implemented"
+    );
+    assert_eq!(src.matches("role: LineRole::OutputVat").count(), 0);
+    // Formula B only: no tolerance band, no nearest-rate search.
+    assert!(!src.contains("<= 50"), "Formula A band must not exist");
+    assert!(src.contains("checked_add(50)"), "Formula B half-up");
 }
 
 // ---------------------------------------------------------------------------
@@ -961,4 +976,516 @@ fn h17_taxonomy_version_mismatch_fails_closed_and_none_is_accepted() {
     let mut none = entity.clone();
     none.taxonomy_version = None;
     assess_cases(&cases, &none, &md).expect("None is accepted");
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3 — first receipt-line sub-slice (FINAL implementation lock §8.1)
+// ---------------------------------------------------------------------------
+
+fn decisions_for(ws: &Workspace, md: &Masterdata) -> (Vec<EngineCase>, Vec<AccountingDecision>) {
+    let entity = ws.read_entity().expect("entity");
+    let cases = project_cases(ws).expect("project");
+    let assessments = assess_cases(&cases, &entity, md).expect("assess");
+    let decisions = decide_cases(&cases, &assessments, &entity, md).expect("decide");
+    (cases, decisions)
+}
+
+fn decide_one(
+    case: &EngineCase,
+    entity: &EntityContext,
+    md: &Masterdata,
+) -> Result<AccountingDecision, EngineError> {
+    let a = assess_cases(std::slice::from_ref(case), entity, md)?;
+    let mut d = decide_cases(std::slice::from_ref(case), &a, entity, md)?;
+    Ok(d.remove(0))
+}
+
+fn line_tuple(d: &AccountingDecision) -> Vec<(i32, &str, LineRole, i64, i64)> {
+    d.lines
+        .iter()
+        .map(|l| (l.line_no, l.account.as_str(), l.role, l.debit.0, l.credit.0))
+        .collect()
+}
+
+fn dcodes(d: &AccountingDecision) -> Vec<FindingCode> {
+    d.findings.iter().map(|f| f.code).collect()
+}
+
+/// A receipt case with the given money facts, cloned from the Bränsle row.
+fn bransle_with(cases: &[EngineCase], net: i64, vat: i64, rounding: i64) -> EngineCase {
+    let i = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("Bränsle");
+    let mut c = cases[i].clone();
+    if let SourceFacts::Receipt {
+        total: t,
+        vat: v,
+        rounding: r,
+        net: n,
+        ..
+    } = &mut c.facts
+    {
+        *n = Ore(net);
+        *v = Ore(vat);
+        *r = Ore(rounding);
+        *t = Ore(net + vat + rounding);
+    }
+    c
+}
+
+// §8.1.1 / §8.1.2 / §8.1.12 — Testgården canonical examples, Conditional under draft
+#[test]
+fn s3_1_testgarden_bransle_and_skogsvard_get_exactly_three_lines() {
+    let db = TempDb::new("s3-1");
+    let ws = testgarden(&db);
+    let md = masterdata();
+    assert!(md.is_draft());
+    let (cases, decisions) = decisions_for(&ws, &md);
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let skogsvard = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Skogsvård"))
+        .expect("row");
+    assert_eq!(
+        line_tuple(&decisions[bransle]),
+        vec![
+            (0, "5360", LineRole::Expense, 500_000, 0),
+            (1, "2640", LineRole::InputVat, 125_000, 0),
+            (2, "1930", LineRole::Counter, 0, 625_000),
+        ]
+    );
+    assert_eq!(
+        decisions[bransle].status,
+        DecisionStatus::Conditional,
+        "draft ceiling"
+    );
+    assert_eq!(
+        dcodes(&decisions[bransle]),
+        vec![FindingCode::MissingEvidence]
+    );
+    assert_eq!(
+        line_tuple(&decisions[skogsvard]),
+        vec![
+            (0, "4470", LineRole::Expense, 2_500_000, 0),
+            (1, "2640", LineRole::InputVat, 625_000, 0),
+            (2, "1930", LineRole::Counter, 0, 3_125_000),
+        ]
+    );
+    assert_eq!(decisions[skogsvard].status, DecisionStatus::Conditional);
+    // Exactly these two cases carry lines; every other decision has zero lines.
+    let with_lines: Vec<usize> = decisions
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| !d.lines.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(with_lines, vec![bransle, skogsvard]);
+    assert!(decisions
+        .iter()
+        .all(|d| d.status != DecisionStatus::Automatic));
+    // Balance and shape invariants hold on every line-bearing decision.
+    for d in decisions.iter().filter(|d| !d.lines.is_empty()) {
+        let debit: i64 = d.lines.iter().map(|l| l.debit.0).sum();
+        let credit: i64 = d.lines.iter().map(|l| l.credit.0).sum();
+        assert_eq!(debit, credit);
+        assert!(d.lines.iter().all(|l| (l.debit.0 > 0) != (l.credit.0 > 0)));
+        assert_eq!(
+            d.lines.iter().map(|l| l.line_no).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_ne!(d.status, DecisionStatus::Manual);
+    }
+    // Manual decisions never carry lines.
+    assert!(decisions
+        .iter()
+        .filter(|d| d.status == DecisionStatus::Manual)
+        .all(|d| d.lines.is_empty()));
+}
+
+// §8.1.3 — Grus rows: rounding / supplier-credit ⇒ zero lines, no E3/E6, no VAT finding
+#[test]
+fn s3_3_grus_rows_stay_fail_closed() {
+    let db = TempDb::new("s3-3");
+    let ws = testgarden(&db);
+    let (cases, decisions) = decisions_for(&ws, &masterdata());
+    let grus: Vec<usize> = cases
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.subject.as_deref() == Some("Grus och material"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(grus.len(), 2);
+    for i in grus {
+        assert!(decisions[i].lines.is_empty(), "case {i}");
+        assert!(
+            !dcodes(&decisions[i])
+                .iter()
+                .any(|c| matches!(c, FindingCode::VatMismatch | FindingCode::UnresolvedVat)),
+            "rounding is a silent skip, not a VAT finding"
+        );
+    }
+    // The supplier_credit row is Manual by its counter finding; the +0.30 row keeps its Conditional ceiling.
+    let supplier = cases.iter().position(|c| matches!(&c.facts, SourceFacts::Receipt { payment_method: Some(p), .. } if p == "supplier_credit")).expect("row");
+    assert_eq!(decisions[supplier].status, DecisionStatus::Manual);
+    let plus30 = cases
+        .iter()
+        .position(|c| matches!(&c.facts, SourceFacts::Receipt { rounding, .. } if rounding.0 == 30))
+        .expect("row");
+    assert_eq!(decisions[plus30].status, DecisionStatus::Conditional);
+    assert!(decisions[plus30].lines.is_empty());
+}
+
+// §8.1.4 — vat_registered != yes ⇒ Manual, zero lines, no invented branch, no VAT finding
+#[test]
+fn s3_4_non_registered_entity_is_manual_with_no_lines_and_no_invented_branch() {
+    let db = TempDb::new("s3-4");
+    let ws = testgarden(&db);
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    for value in [Some("no".to_string()), Some("unknown".to_string()), None] {
+        let mut entity = ws.read_entity().expect("e");
+        entity.vat_registered = value.clone();
+        let d = decide_one(&cases[bransle], &entity, &md).expect("decide");
+        assert_eq!(
+            d.status,
+            DecisionStatus::Manual,
+            "{value:?}: FINAL lock §2.2"
+        );
+        assert!(d.lines.is_empty(), "{value:?}");
+        assert!(
+            !dcodes(&d)
+                .iter()
+                .any(|c| matches!(c, FindingCode::VatMismatch | FindingCode::UnresolvedVat)),
+            "{value:?}: no VAT finding is invented for a non-registered entity"
+        );
+        assert_eq!(dcodes(&d), vec![FindingCode::MissingEvidence]);
+    }
+    // The positive branch is untouched: "yes" still yields the three lines.
+    let d = decide_one(&cases[bransle], &ws.read_entity().expect("e"), &md).expect("decide");
+    assert_eq!(d.lines.len(), 3);
+}
+
+// §8.1.5 / §8.1.6 — L-FIND: genuinely unresolved VAT automation ⇒ UNRESOLVED_VAT / Blocking / Manual / zero lines
+#[test]
+fn s3_5_6_unresolved_vat_automation_is_blocking_manual() {
+    let db = TempDb::new("s3-5");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let cases = project_cases(&ws).expect("p");
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let one = &cases[bransle];
+
+    let mut md = masterdata();
+    md.vat
+        .rules
+        .iter_mut()
+        .find(|r| r.id == "ing25")
+        .expect("rule")
+        .rates = vec!["25".to_string(), "12".to_string()];
+    let d = decide_one(one, &entity, &md).expect("decide");
+    assert_eq!(d.status, DecisionStatus::Manual);
+    assert!(d.lines.is_empty());
+    assert_eq!(
+        dcodes(&d),
+        vec![FindingCode::UnresolvedVat, FindingCode::MissingEvidence]
+    );
+    assert_eq!(d.findings[0].severity, Severity::Blocking);
+    assert_eq!(
+        d.findings.iter().map(|f| f.finding_no).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+
+    let mut md = masterdata();
+    md.vat
+        .rules
+        .iter_mut()
+        .find(|r| r.id == "ing25")
+        .expect("rule")
+        .manual_review = true;
+    let d = decide_one(one, &entity, &md).expect("decide");
+    assert_eq!(
+        (d.status, dcodes(&d)[0]),
+        (DecisionStatus::Manual, FindingCode::UnresolvedVat)
+    );
+
+    let mut md = masterdata();
+    md.vat
+        .rules
+        .iter_mut()
+        .find(|r| r.id == "ing25")
+        .expect("rule")
+        .deductibility = "manuell".to_string();
+    let d = decide_one(one, &entity, &md).expect("decide");
+    assert_eq!(
+        (d.status, dcodes(&d)[0]),
+        (DecisionStatus::Manual, FindingCode::UnresolvedVat)
+    );
+
+    // Usable receipt rule case without a VAT rule id ⇒ UNRESOLVED_VAT.
+    let mut md = masterdata();
+    md.ruleset
+        .cases
+        .iter_mut()
+        .find(|c| c.case_id == "bransle.default")
+        .expect("case")
+        .vat_rule = None;
+    let d = decide_one(one, &entity, &md).expect("decide");
+    assert_eq!(
+        (d.status, dcodes(&d)[0]),
+        (DecisionStatus::Manual, FindingCode::UnresolvedVat)
+    );
+    assert!(d.lines.is_empty());
+
+    // Known out-of-scope branches (§2.4): Manual, zero lines, no VAT_MISMATCH, no UNRESOLVED_VAT —
+    // deductibility "ingen", direction "utgående", rate "0".
+    for (field, mutate) in [
+        (
+            "ingen",
+            Box::new(|r: &mut sieverk::ruleset::VatRule| r.deductibility = "ingen".to_string())
+                as Box<dyn Fn(&mut sieverk::ruleset::VatRule)>,
+        ),
+        (
+            "utgående",
+            Box::new(|r: &mut sieverk::ruleset::VatRule| r.direction = "utgående".to_string()),
+        ),
+        (
+            "rate 0",
+            Box::new(|r: &mut sieverk::ruleset::VatRule| r.rates = vec!["0".to_string()]),
+        ),
+    ] {
+        let mut md = masterdata();
+        mutate(
+            md.vat
+                .rules
+                .iter_mut()
+                .find(|r| r.id == "ing25")
+                .expect("rule"),
+        );
+        let d = decide_one(one, &entity, &md).expect("decide");
+        assert!(d.lines.is_empty(), "{field}");
+        assert_eq!(
+            dcodes(&d),
+            vec![FindingCode::MissingEvidence],
+            "{field}: no VAT finding"
+        );
+        assert_eq!(d.status, DecisionStatus::Manual, "{field}: FINAL lock §2.4");
+    }
+
+    // A VAT rule id that does not resolve is masterdata integrity, not a finding.
+    let mut md = masterdata();
+    md.ruleset
+        .cases
+        .iter_mut()
+        .find(|c| c.case_id == "bransle.default")
+        .expect("case")
+        .vat_rule = Some("nope".to_string());
+    let e = decide_one(one, &entity, &md).expect_err("must fail closed");
+    assert!(matches!(e, EngineError::Masterdata { .. }), "{e}");
+}
+
+// §8.1.7 / §8.1.8 / §8.1.9 / §8.1.10 — E1 Formula B vectors
+#[test]
+fn s3_7_to_10_e1_formula_b_vectors() {
+    let db = TempDb::new("s3-e1");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+
+    // happy: 5 000,00 / 1 250,00 @ 25 % ⇒ PASS
+    let d = decide_one(&bransle_with(&cases, 500_000, 125_000, 0), &entity, &md).expect("decide");
+    assert_eq!(d.lines.len(), 3);
+    assert_eq!(d.lines[1].debit, Ore(125_000), "source VAT used unchanged");
+    // mismatch: 1 249,00 ⇒ VAT_MISMATCH / Manual / zero lines
+    let d = decide_one(&bransle_with(&cases, 500_000, 124_900, 0), &entity, &md).expect("decide");
+    assert_eq!(d.status, DecisionStatus::Manual);
+    assert!(d.lines.is_empty());
+    assert_eq!(
+        dcodes(&d),
+        vec![FindingCode::VatMismatch, FindingCode::MissingEvidence]
+    );
+    assert!(
+        d.findings[0].message.contains("125000"),
+        "expected VAT is named, never applied: {}",
+        d.findings[0].message
+    );
+    // half-up edge: net 12,34 @ 25 % ⇒ expected 3,09
+    let d = decide_one(&bransle_with(&cases, 1234, 309, 0), &entity, &md).expect("decide");
+    assert_eq!(d.lines.len(), 3, "309 PASS");
+    for bad in [308, 310] {
+        let d = decide_one(&bransle_with(&cases, 1234, bad, 0), &entity, &md).expect("decide");
+        assert_eq!(dcodes(&d)[0], FindingCode::VatMismatch, "{bad} FAIL");
+        assert!(d.lines.is_empty());
+        assert_eq!(d.status, DecisionStatus::Manual);
+    }
+    // zero VAT: expected > 0 ⇒ VAT_MISMATCH; expected == 0 ⇒ UNRESOLVED_VAT; never a zero InputVat line
+    let d = decide_one(&bransle_with(&cases, 500_000, 0, 0), &entity, &md).expect("decide");
+    assert_eq!(dcodes(&d)[0], FindingCode::VatMismatch);
+    assert!(d.lines.is_empty());
+    let d = decide_one(&bransle_with(&cases, 1, 0, 0), &entity, &md).expect("decide"); // 1 öre × 25 % + 50 = 75 → 0
+    assert_eq!(dcodes(&d)[0], FindingCode::UnresolvedVat);
+    assert!(d.lines.is_empty());
+    assert_eq!(d.status, DecisionStatus::Manual);
+    // rounding ≠ 0 is a silent skip even when the VAT would pass
+    let d = decide_one(&bransle_with(&cases, 500_000, 125_000, 30), &entity, &md).expect("decide");
+    assert!(d.lines.is_empty());
+    assert_eq!(dcodes(&d), vec![FindingCode::MissingEvidence]);
+}
+
+// §8.1.11 — ProposalGuard failure on any proposed account ⇒ EngineError::ProposalGuard
+#[test]
+fn s3_11_proposal_guard_on_every_line_account() {
+    let db = TempDb::new("s3-11");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let cases = project_cases(&ws).expect("p");
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let one = &cases[bransle];
+    // VAT account 2640 made non-proposable: the assessment passes (no rule references 2640
+    // structurally), but line construction proposes it and must fail.
+    let mut md = masterdata();
+    md.chart
+        .accounts
+        .iter_mut()
+        .find(|a| a.number == "2640")
+        .expect("acc")
+        .roles
+        .engine_proposable = false;
+    let a = assess_cases(std::slice::from_ref(one), &entity, &md).expect("assessment still passes");
+    let e =
+        decide_cases(std::slice::from_ref(one), &a, &entity, &md).expect_err("vat account guard");
+    assert!(
+        matches!(&e, EngineError::ProposalGuard { account, .. } if account == "2640"),
+        "{e}"
+    );
+    // Counter account inactive ⇒ guard (already at assessment for an Automatic counter row).
+    let mut md = masterdata();
+    md.chart
+        .accounts
+        .iter_mut()
+        .find(|a| a.number == "1930")
+        .expect("acc")
+        .roles
+        .active = false;
+    let e = decide_one(one, &entity, &md).expect_err("counter guard");
+    assert!(
+        matches!(&e, EngineError::ProposalGuard { account, .. } if account == "1930"),
+        "{e}"
+    );
+}
+
+// §8.1.13 — approved lifecycle (in-memory) ⇒ Automatic with lines only when everything is Automatic/approved
+#[test]
+fn s3_13_approved_masterdata_yields_automatic_with_lines() {
+    let db = TempDb::new("s3-13");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let cases = project_cases(&ws).expect("p");
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let mut md = masterdata();
+    md.chart.review_status = "approved".to_string();
+    md.chart.header.review_status = "approved".to_string();
+    md.ruleset.review_status = "approved".to_string();
+    let case = md
+        .ruleset
+        .cases
+        .iter_mut()
+        .find(|c| c.case_id == "bransle.default")
+        .expect("case");
+    case.automation = "Automatic".to_string();
+    let d = decide_one(&cases[bransle], &entity, &md).expect("decide");
+    assert_eq!(d.status, DecisionStatus::Automatic);
+    assert_eq!(d.lines.len(), 3);
+    // With the counter row Conditional instead, the ceiling is Conditional.
+    md.counter
+        .rows
+        .iter_mut()
+        .find(|r| r.key == "company_account")
+        .expect("row")
+        .automation = "Conditional".to_string();
+    md.counter
+        .rows
+        .iter_mut()
+        .find(|r| r.key == "company_account")
+        .expect("row")
+        .question = Some("Bekräfta".to_string());
+    let d = decide_one(&cases[bransle], &entity, &md).expect("decide");
+    assert_eq!(d.status, DecisionStatus::Conditional);
+    assert_eq!(d.lines.len(), 3);
+}
+
+// §8.1.14 — checked arithmetic overflow ⇒ MoneyInvariant, never wrap
+#[test]
+fn s3_14_overflow_is_money_invariant() {
+    let db = TempDb::new("s3-14");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let mut c = cases[bransle].clone();
+    if let SourceFacts::Receipt {
+        total,
+        vat,
+        net,
+        rounding,
+        ..
+    } = &mut c.facts
+    {
+        *net = Ore(i64::MAX / 10);
+        *vat = Ore(0);
+        *rounding = Ore(0);
+        *total = Ore(i64::MAX / 10); // keeps net + vat + rounding == total
+    }
+    let e = decide_one(&c, &entity, &md).expect_err("net × 25 overflows");
+    assert!(matches!(e, EngineError::MoneyInvariant { .. }), "{e}");
+}
+
+// §8.1.15 — finding order: VAT finding + MISSING_EVIDENCE ⇒ fixed rank, dense numbering
+#[test]
+fn s3_15_vat_finding_is_ranked_and_renumbered() {
+    let db = TempDb::new("s3-15");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+    let d = decide_one(&bransle_with(&cases, 500_000, 124_900, 0), &entity, &md).expect("decide");
+    assert_eq!(
+        d.findings
+            .iter()
+            .map(|f| (f.finding_no, f.code))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, FindingCode::VatMismatch),
+            (1, FindingCode::MissingEvidence)
+        ]
+    );
+    // The structural assessment (Slice 1) is not rewritten: it still has only the warning.
+    let a = assess_cases(
+        std::slice::from_ref(&bransle_with(&cases, 500_000, 124_900, 0)),
+        &entity,
+        &md,
+    )
+    .expect("a");
+    assert_eq!(codes(&a[0]), vec![FindingCode::MissingEvidence]);
 }

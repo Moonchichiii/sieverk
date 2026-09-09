@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use duckdb::Connection;
 use serde_json::Value;
-use sieverk::engine::{assess_cases, project_cases, run_engine, CaseSource, SourceFacts};
+use sieverk::engine::{
+    assess_cases, decide_cases, project_cases, run_engine, CaseSource, SourceFacts,
+};
 use sieverk::money::Ore;
 use sieverk::ruleset::load_masterdata;
 use sieverk::snapshot::parse_snapshot;
@@ -16,7 +18,7 @@ use sieverk::workspace::{
     canonical_decision_text, canonical_snapshot_bytes, EngineState, IngestOutcome, PersistedCase,
     PersistedFinding, PersistedLine, RunProvenance, Workspace, WorkspaceError,
     ENGINE_RUN_META_COLUMNS, SCHEMA_V1_TABLES, SCHEMA_V2_TABLES, WORKSPACE_SCHEMA,
-    WORKSPACE_SCHEMA_ENGINE,
+    WORKSPACE_SCHEMA_DECISIONS, WORKSPACE_SCHEMA_ENGINE,
 };
 
 /// A unique path under the OS temp dir; removed before use so each test
@@ -137,7 +139,7 @@ fn schema_mismatch_is_reported_with_both_versions() {
             err,
             WorkspaceError::SchemaMismatch {
                 found: 99,
-                expected: WORKSPACE_SCHEMA_ENGINE
+                expected: WORKSPACE_SCHEMA_DECISIONS
             }
         ),
         "{err}"
@@ -1196,12 +1198,13 @@ fn s1_run_preserves_schema_v1_rows_and_fingerprint() {
     let ev = run_engine(&mut ws, &masterdata()).expect("run");
     assert_eq!(
         ws.schema_version().expect("schema"),
-        WORKSPACE_SCHEMA_ENGINE
+        WORKSPACE_SCHEMA_DECISIONS
     );
     assert_eq!(v1_state(&ws), before);
     assert_eq!(ws.read_meta().expect("meta"), meta_before);
     assert_eq!(ws.read_entity().expect("entity"), entity_before);
-    assert_eq!((ev.cases, ev.findings, ev.lines), (27, ev.findings, 0));
+    // Slice 3: Bränsle + Skogsvård carry three lines each; everything else zero.
+    assert_eq!((ev.cases, ev.lines), (27, 6));
     let mut expected: Vec<String> = v1_tables();
     expected.extend(SCHEMA_V2_TABLES.iter().map(|s| s.to_string()));
     expected.sort();
@@ -1229,28 +1232,55 @@ fn s2_persisted_run_survives_reopen_and_verifies() {
     assert!(findings
         .windows(2)
         .all(|w| (w[0].case_seq, w[0].finding_no) < (w[1].case_seq, w[1].finding_no)));
-    assert!(ws.read_decision_lines().expect("lines").is_empty());
+    assert_eq!(ws.read_decision_lines().expect("lines").len(), 6);
     assert_eq!(ws.verify_run().expect("verify"), ev.run);
 }
 
-// S3 — zero lines by typed readback AND raw SQL; an injected line is Corrupt
+// S3 — a schema-2 (Slice-2) evidence file stays zero-line forever: any line ⇒ Corrupt
 #[test]
-fn s3_zero_decision_lines_and_injected_line_is_corrupt() {
+fn s3_schema2_evidence_rejects_any_decision_line() {
     let db = TempDb::new("s3");
-    let (ws, _) = run_testgarden(&db);
+    let (ws, ev) = run_testgarden(&db);
+    // Reconstruct a Slice-2 evidence file from this run: schema 2, zero lines,
+    // digest recomputed over the zero-line content (what the Slice-2 build wrote).
+    sql(&ws, "DELETE FROM decision_lines");
+    let cases = ws.read_cases().expect("cases");
+    let findings = ws.read_findings().expect("findings");
+    let d2 = ws
+        .decision_digest(&ev.run.provenance, &cases, &findings, &[])
+        .expect("digest");
+    sql(
+        &ws,
+        &format!("UPDATE engine_run_meta SET decision_sha256 = '{d2}'"),
+    );
+    sql(&ws, "UPDATE workspace_meta SET workspace_schema = 2");
+    ws.close().expect("close");
+    let ws = Workspace::open(db.path()).expect("schema-2 file opens");
+    assert_eq!(
+        ws.schema_version().expect("schema"),
+        WORKSPACE_SCHEMA_ENGINE
+    );
     assert!(ws.read_decision_lines().expect("lines").is_empty());
     assert_eq!(count(&ws, "decision_lines"), 0);
+    ws.verify_run()
+        .expect("zero-line schema-2 evidence verifies");
     sql(
         &ws,
         "INSERT INTO decision_lines VALUES (0, 0, '5360', 'expense', 1000, 0)",
     );
     let e = ws
         .verify_run()
-        .expect_err("line must be refused in Slice 2");
+        .expect_err("line must be refused in a schema-2 run");
     assert!(
         matches!(&e, WorkspaceError::Corrupt(m) if m.contains("decision_lines")),
         "{e}"
     );
+    // ingest() on schema 2 stays digest-only.
+    let mut ws = ws;
+    assert!(matches!(
+        ws.ingest(&fixture(TESTGARDEN)),
+        Ok(IngestOutcome::AlreadyIngested { .. })
+    ));
 }
 
 // S4 — determinism across two independent workspaces; row mutation ⇒ digest mismatch
@@ -1283,6 +1313,8 @@ fn s5_rollback_via_engine_run_meta_check_leaves_exact_schema_v1_state() {
     let (dws, dev) = run_testgarden(&donor);
     let cases = dws.read_cases().expect("cases");
     let findings = dws.read_findings().expect("findings");
+    let lines = dws.read_decision_lines().expect("lines");
+    assert_eq!(lines.len(), 6, "the donor run carries lines");
 
     let db = TempDb::new("s5");
     let mut ws = ingest_testgarden(&db);
@@ -1290,7 +1322,7 @@ fn s5_rollback_via_engine_run_meta_check_leaves_exact_schema_v1_state() {
     let mut bogus = dev.run.provenance.clone();
     bogus.ruleset_status = "bogus".to_string();
     let e = ws
-        .persist_run(&bogus, &cases, &findings)
+        .persist_run(&bogus, &cases, &findings, &lines)
         .expect_err("CHECK on engine_run_meta must fail");
     assert!(matches!(e, WorkspaceError::Duckdb(_)), "{e}");
     assert_eq!(ws.schema_version().expect("schema"), WORKSPACE_SCHEMA);
@@ -1323,7 +1355,7 @@ fn s6_second_run_is_already_run_before_mutation() {
     let cases = rows_before.0.clone();
     let findings = rows_before.1.clone();
     let e = ws
-        .persist_run(&ev.run.provenance, &cases, &findings)
+        .persist_run(&ev.run.provenance, &cases, &findings, &[])
         .expect_err("direct rerun");
     assert!(matches!(e, WorkspaceError::AlreadyRun { .. }), "{e}");
     assert_eq!(
@@ -1360,7 +1392,7 @@ fn s7_schema2_without_run_is_notrun_for_reads_corrupt_for_runs_and_ingest_refuse
     );
     let cases = Vec::<PersistedCase>::new();
     let e = ws
-        .persist_run(&ev.run.provenance, &cases, &[])
+        .persist_run(&ev.run.provenance, &cases, &[], &[])
         .expect_err("persist on recovery container");
     assert!(matches!(e, WorkspaceError::Corrupt(_)), "{e}");
     // ingest guard on schema 2 with one snapshot: digest comparison only, no write.
@@ -1388,10 +1420,10 @@ fn s7b_schema2_zero_run_zero_snapshot_ingest_refuses_without_mutation() {
               DELETE FROM snapshot_meta; DELETE FROM entity_context; DELETE FROM entity_operations; \
               DELETE FROM properties; DELETE FROM receipts; DELETE FROM income_entries; DELETE FROM audit_chain");
     ws.close().expect("close");
-    let mut ws = Workspace::open(db.path()).expect("empty schema-2 container opens");
+    let mut ws = Workspace::open(db.path()).expect("empty run-schema container opens");
     assert_eq!(
         ws.schema_version().expect("schema"),
-        WORKSPACE_SCHEMA_ENGINE
+        WORKSPACE_SCHEMA_DECISIONS
     );
     assert_eq!(ws.snapshot_count().expect("count"), 0);
     let e = ws.ingest(&fixture(TESTGARDEN)).expect_err("must refuse");
@@ -1402,7 +1434,7 @@ fn s7b_schema2_zero_run_zero_snapshot_ingest_refuses_without_mutation() {
     }
     assert_eq!(
         ws.schema_version().expect("schema"),
-        WORKSPACE_SCHEMA_ENGINE
+        WORKSPACE_SCHEMA_DECISIONS
     );
 }
 
@@ -1471,7 +1503,7 @@ fn s8b_single_run_row_with_wrong_run_seq_is_corrupt_on_open() {
 fn s9b_ingest_refuses_unsupported_schema_before_any_mutation() {
     let db = TempDb::new("s9b");
     let mut ws = Workspace::create(db.path()).expect("create");
-    sql(&ws, "UPDATE workspace_meta SET workspace_schema = 3");
+    sql(&ws, "UPDATE workspace_meta SET workspace_schema = 4");
     let before = counts(&ws);
     assert_eq!(ws.snapshot_count().expect("count"), 0);
     let e = ws
@@ -1481,8 +1513,8 @@ fn s9b_ingest_refuses_unsupported_schema_before_any_mutation() {
         matches!(
             e,
             WorkspaceError::SchemaMismatch {
-                found: 3,
-                expected: WORKSPACE_SCHEMA_ENGINE
+                found: 4,
+                expected: WORKSPACE_SCHEMA_DECISIONS
             }
         ),
         "{e}"
@@ -1536,7 +1568,7 @@ fn s7c_run_engine_on_schema2_recovery_states_is_corrupt() {
 // S9 — schema 3 / 0 ⇒ SchemaMismatch { found, expected: 2 }
 #[test]
 fn s9_unsupported_schema_versions_are_mismatch() {
-    for (name, v) in [("s9-3", 3), ("s9-0", 0)] {
+    for (name, v) in [("s9-4", 4), ("s9-0", 0)] {
         let db = TempDb::new(name);
         Workspace::create(db.path())
             .expect("create")
@@ -1552,7 +1584,7 @@ fn s9_unsupported_schema_versions_are_mismatch() {
         }
         let e = Workspace::open(db.path()).expect_err("unsupported");
         assert!(
-            matches!(e, WorkspaceError::SchemaMismatch { found, expected: WORKSPACE_SCHEMA_ENGINE } if found == v),
+            matches!(e, WorkspaceError::SchemaMismatch { found, expected: WORKSPACE_SCHEMA_DECISIONS } if found == v),
             "{e}"
         );
     }
@@ -1683,7 +1715,7 @@ fn s11_testgarden_persisted_counts_references_and_types() {
         .is_some()
         && c.entry_type.as_deref() == Some("expense")
         && c.area.is_some()));
-    assert_eq!(count(&ws, "decision_lines"), 0);
+    assert_eq!(count(&ws, "decision_lines"), 6);
     assert_eq!(
         one_string(&ws, "SELECT typeof(date) FROM accounting_cases LIMIT 1"),
         "DATE"
@@ -1746,11 +1778,13 @@ fn s13_public_api_round_trip_is_lossless() {
     let entity = ws.read_entity().expect("entity");
     let engine_cases = project_cases(&ws).expect("project");
     let assessments = assess_cases(&engine_cases, &entity, &md).expect("assess");
+    let decisions = decide_cases(&engine_cases, &assessments, &entity, &md).expect("decide");
     run_engine(&mut ws, &md).expect("run");
     let persisted = ws.read_cases().expect("cases");
     let findings = ws.read_findings().expect("findings");
+    let plines = ws.read_decision_lines().expect("lines");
     assert_eq!(persisted.len(), engine_cases.len());
-    for ((ec, a), pc) in engine_cases.iter().zip(&assessments).zip(&persisted) {
+    for ((ec, a), pc) in engine_cases.iter().zip(&decisions).zip(&persisted) {
         assert_eq!(pc.case_seq, ec.case_seq);
         assert_eq!(
             pc.source,
@@ -1867,7 +1901,19 @@ fn s13_public_api_round_trip_is_lossless() {
                     && pc.counter_bookkeeping_method.is_none()
             ),
         }
-        assert_eq!(pc.status, format!("{:?}", a.status_ceiling));
+        assert_eq!(pc.status, format!("{:?}", a.status));
+        let mine_lines: Vec<&PersistedLine> = plines
+            .iter()
+            .filter(|l| l.case_seq == ec.case_seq)
+            .collect();
+        assert_eq!(mine_lines.len(), a.lines.len());
+        for (pl, l) in mine_lines.iter().zip(&a.lines) {
+            assert_eq!(
+                (pl.line_no, pl.account.as_str(), pl.role.as_str()),
+                (l.line_no, l.account.as_str(), l.role.as_str())
+            );
+            assert_eq!((pl.debit, pl.credit), (l.debit, l.credit));
+        }
         let mine: Vec<&PersistedFinding> = findings
             .iter()
             .filter(|f| f.case_seq == ec.case_seq)
@@ -2031,7 +2077,7 @@ fn s15_source_mirror_mutations_are_corrupt_before_digest() {
     let db = TempDb::new("s15-preflight");
     let mut ws = ingest_testgarden(&db);
     let e = ws
-        .persist_run(&dev.run.provenance, &cases, &findings)
+        .persist_run(&dev.run.provenance, &cases, &findings, &[])
         .expect_err("altered net");
     assert!(
         matches!(&e, WorkspaceError::Corrupt(m) if m.contains("mirror")),
@@ -2061,6 +2107,7 @@ fn s16_persist_run_preflight_refuses_every_structural_violation() {
 
     type Mutation =
         Box<dyn Fn(&mut Vec<PersistedCase>, &mut Vec<PersistedFinding>, &mut RunProvenance)>;
+    let good_lines = dws.read_decision_lines().expect("lines");
     fn m(
         f: impl Fn(&mut Vec<PersistedCase>, &mut Vec<PersistedFinding>, &mut RunProvenance) + 'static,
     ) -> Mutation {
@@ -2087,7 +2134,7 @@ fn s16_persist_run_preflight_refuses_every_structural_violation() {
             }),
         ),
         (
-            "VAT finding in Slice 2",
+            "VAT finding on a non-Manual case",
             m(move |_, f, _| {
                 f.retain(|x| x.case_seq != bransle);
                 f.push(PersistedFinding {
@@ -2172,7 +2219,7 @@ fn s16_persist_run_preflight_refuses_every_structural_violation() {
         let fp = ws.logical_fingerprint().expect("fp");
         let (mut c, mut f, mut p) = (good_cases.clone(), good_findings.clone(), prov.clone());
         mutate(&mut c, &mut f, &mut p);
-        let e = ws.persist_run(&p, &c, &f).expect_err(name);
+        let e = ws.persist_run(&p, &c, &f, &good_lines).expect_err(name);
         assert!(matches!(e, WorkspaceError::Corrupt(_)), "{name}: {e}");
         assert_eq!(
             ws.schema_version().expect("schema"),
@@ -2188,7 +2235,7 @@ fn s16_persist_run_preflight_refuses_every_structural_violation() {
 #[test]
 fn s17_post_run_structural_mutations_are_corrupt() {
     let scenarios = [
-        ("s17-vat-code", "UPDATE findings SET code = 'UNRESOLVED_VAT' WHERE case_seq = 0 AND finding_no = 0", "not allowed in a Slice-2 run"),
+        ("s17-vat-code", "UPDATE findings SET code = 'UNRESOLVED_VAT' WHERE case_seq = 0 AND finding_no = 0", "digest"),
         ("s17-severity", "UPDATE findings SET severity = 'blocking' WHERE code = 'MISSING_EVIDENCE' AND case_seq = 1", "must have severity"),
         ("s17-dup", "UPDATE findings SET code = 'MISSING_EVIDENCE', severity = 'warning' WHERE case_seq = 0 AND finding_no = 0", "duplicate code"),
         ("s17-status", "UPDATE accounting_cases SET status = 'Conditional' WHERE case_seq = 0", "blocking finding but status"),
@@ -2205,4 +2252,215 @@ fn s17_post_run_structural_mutations_are_corrupt() {
             "{name}: {e}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// SV-03 Slice 3 — schema 3 line persistence and verification (FINAL lock §8.2)
+// ---------------------------------------------------------------------------
+
+// T1 — schema 1 → 3 with the Testgården lines; readback shape; reopen; ingest digest-only
+#[test]
+fn t1_schema3_run_persists_three_lines_per_eligible_receipt() {
+    let db = TempDb::new("t1");
+    let (ws, ev) = run_testgarden(&db);
+    assert_eq!(
+        ws.schema_version().expect("schema"),
+        WORKSPACE_SCHEMA_DECISIONS
+    );
+    assert_eq!(ev.lines, 6);
+    ws.close().expect("close");
+    let mut ws = Workspace::open(db.path()).expect("reopen schema 3");
+    let lines = ws.read_decision_lines().expect("lines");
+    let cases = ws.read_cases().expect("cases");
+    assert_eq!(lines.len(), 6);
+    let bransle = cases
+        .iter()
+        .find(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let mine: Vec<_> = lines
+        .iter()
+        .filter(|l| l.case_seq == bransle.case_seq)
+        .collect();
+    assert_eq!(
+        mine.iter()
+            .map(|l| (
+                l.line_no,
+                l.account.as_str(),
+                l.role.as_str(),
+                l.debit.0,
+                l.credit.0
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, "5360", "expense", 500_000, 0),
+            (1, "2640", "input_vat", 125_000, 0),
+            (2, "1930", "counter", 0, 625_000)
+        ]
+    );
+    assert_eq!(bransle.status, "Conditional");
+    for c in &cases {
+        let n = lines.iter().filter(|l| l.case_seq == c.case_seq).count();
+        assert!(n == 0 || n == 3, "case {}: {n} lines", c.case_seq);
+        if c.status == "Manual" {
+            assert_eq!(n, 0);
+        }
+    }
+    assert_eq!(
+        one_string(&ws, "SELECT typeof(debit_ore) FROM decision_lines LIMIT 1"),
+        "BIGINT"
+    );
+    assert_eq!(ws.verify_run().expect("verify"), ev.run);
+    // ingest() on schema 3 is digest-only.
+    let fp = ws.logical_fingerprint().expect("fp");
+    assert!(matches!(
+        ws.ingest(&fixture(TESTGARDEN)),
+        Ok(IngestOutcome::AlreadyIngested { .. })
+    ));
+    assert!(matches!(
+        ws.ingest(&fixture("minimal-1.1.json")),
+        Err(WorkspaceError::SnapshotMismatch { .. })
+    ));
+    assert_eq!(ws.logical_fingerprint().expect("fp"), fp);
+    assert_eq!(count(&ws, "decision_lines"), 6);
+}
+
+// T2 — every schema-3 line corruption is Corrupt (or refused by the DDL) after reopen
+#[test]
+fn t2_schema3_line_corruptions_are_corrupt() {
+    // Case 1 = Bränsle (three lines); case 0 = Röjning (Manual, unmapped, zero lines).
+    let scenarios = [
+        ("t2-orphan", "INSERT INTO decision_lines VALUES (999, 0, '5360', 'expense', 1, 0)", "orphan"),
+        ("t2-gap", "UPDATE decision_lines SET line_no = 7 WHERE case_seq = 1 AND line_no = 2", "dense"),
+        ("t2-unbalanced", "UPDATE decision_lines SET debit_ore = debit_ore + 1 WHERE case_seq = 1 AND line_no = 0", "balance"),
+        ("t2-manual", "INSERT INTO decision_lines VALUES (0, 0, '5360', 'expense', 1, 0)", "Manual case carries lines"),
+        ("t2-shape", "UPDATE decision_lines SET account = '536' WHERE case_seq = 1 AND line_no = 0", "four digits"),
+        ("t2-automatic-nolines", "UPDATE accounting_cases SET status = 'Automatic' WHERE case_seq = 0", "Automatic"),
+    ];
+    for (name, statement, reason) in scenarios {
+        let db = TempDb::new(name);
+        let (ws, _) = run_testgarden(&db);
+        sql(&ws, statement);
+        let e = ws.verify_run().expect_err(statement);
+        assert!(
+            matches!(&e, WorkspaceError::Corrupt(m) if m.contains(reason)),
+            "{name}: {e}"
+        );
+    }
+    // Neither side positive and an invalid role are refused by the DDL CHECKs themselves.
+    let db = TempDb::new("t2-ddl");
+    let (ws, _) = run_testgarden(&db);
+    assert!(ws.connection().execute_batch("UPDATE decision_lines SET debit_ore = 0, credit_ore = 0 WHERE case_seq = 1 AND line_no = 0").is_err());
+    assert!(
+        ws.connection()
+            .execute_batch(
+                "UPDATE decision_lines SET credit_ore = 1 WHERE case_seq = 1 AND line_no = 0"
+            )
+            .is_err(),
+        "both sides positive is refused by the DDL"
+    );
+    assert!(ws
+        .connection()
+        .execute_batch(
+            "UPDATE decision_lines SET role = 'bogus' WHERE case_seq = 1 AND line_no = 0"
+        )
+        .is_err());
+    assert!(ws
+        .connection()
+        .execute_batch(
+            "UPDATE decision_lines SET debit_ore = -1 WHERE case_seq = 1 AND line_no = 0"
+        )
+        .is_err());
+    ws.verify_run().expect("untouched run still verifies");
+}
+
+// T3 — persist_run refuses line-level violations before mutation (schema stays 1)
+#[test]
+fn t3_persist_run_line_preflight() {
+    let donor = TempDb::new("t3-donor");
+    let (dws, dev) = run_testgarden(&donor);
+    let good_cases = dws.read_cases().expect("cases");
+    let good_findings = dws.read_findings().expect("findings");
+    let good_lines = dws.read_decision_lines().expect("lines");
+    let bransle = good_cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row") as i32;
+    type LineMutation = Box<dyn Fn(&mut Vec<PersistedCase>, &mut Vec<PersistedLine>)>;
+    fn m(f: impl Fn(&mut Vec<PersistedCase>, &mut Vec<PersistedLine>) + 'static) -> LineMutation {
+        Box::new(f)
+    }
+    let scenarios: Vec<(&str, LineMutation)> = vec![
+        ("orphan line", m(|_, l| l[0].case_seq = 999)),
+        ("line under Manual", m(|_, l| l[0].case_seq = 0)),
+        ("unbalanced", m(|_, l| l[0].debit = Ore(l[0].debit.0 + 1))),
+        ("both sides", m(|_, l| l[0].credit = Ore(1))),
+        ("non-dense line_no", m(|_, l| l[2].line_no = 5)),
+        (
+            "bad account shape",
+            m(|_, l| l[0].account = "53600".to_string()),
+        ),
+        ("unknown role", m(|_, l| l[0].role = "bogus".to_string())),
+        (
+            "Automatic without lines",
+            m(move |c, _| c[0].status = "Automatic".to_string()),
+        ),
+        (
+            "lines on a Manual status",
+            m(move |c, _| c[bransle as usize].status = "Manual".to_string()),
+        ),
+    ];
+    for (name, mutate) in scenarios {
+        let db = TempDb::new(&format!("t3-{}", name.replace(' ', "-")));
+        let mut ws = ingest_testgarden(&db);
+        let fp = ws.logical_fingerprint().expect("fp");
+        let (mut c, mut l) = (good_cases.clone(), good_lines.clone());
+        mutate(&mut c, &mut l);
+        let e = ws
+            .persist_run(&dev.run.provenance, &c, &good_findings, &l)
+            .expect_err(name);
+        assert!(matches!(e, WorkspaceError::Corrupt(_)), "{name}: {e}");
+        assert_eq!(
+            ws.schema_version().expect("schema"),
+            WORKSPACE_SCHEMA,
+            "{name}"
+        );
+        assert_eq!(ws.table_names().expect("tables"), v1_tables(), "{name}");
+        assert_eq!(ws.logical_fingerprint().expect("fp"), fp, "{name}");
+    }
+    // The unmodified rows persist and verify on a fresh workspace.
+    let db = TempDb::new("t3-good");
+    let mut ws = ingest_testgarden(&db);
+    let run = ws
+        .persist_run(
+            &dev.run.provenance,
+            &good_cases,
+            &good_findings,
+            &good_lines,
+        )
+        .expect("valid");
+    assert_eq!(run, dev.run);
+    assert_eq!(ws.verify_run().expect("verify"), dev.run);
+}
+
+// T4 — digest with line records is deterministic and line-sensitive
+#[test]
+fn t4_digest_covers_lines() {
+    let a = TempDb::new("t4a");
+    let b = TempDb::new("t4b");
+    let (wa, ea) = run_testgarden(&a);
+    let (wb, eb) = run_testgarden(&b);
+    assert_eq!(ea.run.decision_sha256, eb.run.decision_sha256);
+    assert_eq!(
+        wa.read_decision_lines().expect("a"),
+        wb.read_decision_lines().expect("b")
+    );
+    sql(
+        &wb,
+        "UPDATE decision_lines SET account = '5361' WHERE case_seq = 1 AND line_no = 0",
+    );
+    let e = wb.verify_run().expect_err("changed line");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("digest")),
+        "{e}"
+    );
 }

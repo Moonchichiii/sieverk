@@ -23,6 +23,7 @@ use chrono::NaiveDate;
 use duckdb::{params, Connection, Transaction};
 use serde_json::Value;
 
+use crate::chart::is_account_number;
 use crate::money::Ore;
 use crate::snapshot::{parse_snapshot, AuditEvent, Snapshot};
 
@@ -324,8 +325,23 @@ pub const SCHEMA_V1_TABLES: [&str; 8] = [
     "audit_chain",
 ];
 
-/// Schema version of a workspace that holds a persisted engine run (SV-03).
+/// Schema version of a workspace that holds a persisted Slice-2 structural
+/// engine run (SV-03). `decision_lines` must stay empty forever in such a file.
 pub const WORKSPACE_SCHEMA_ENGINE: i32 = 2;
+
+/// Schema version of a workspace that holds a Slice-3 accounting-decision run
+/// (SV-03). Same four tables as schema 2; `decision_lines` may carry rows.
+pub const WORKSPACE_SCHEMA_DECISIONS: i32 = 3;
+
+/// The persisted line roles (DDL CHECK set).
+pub const LINE_ROLES: [&str; 6] = [
+    "expense",
+    "income",
+    "input_vat",
+    "output_vat",
+    "counter",
+    "rounding",
+];
 
 /// Schema v2 — the four SV-03 tables (SV-03 Slice 2 design rev 2 + final
 /// addendum). Money is BIGINT öre, dates DATE, flags BOOLEAN. Source facts are
@@ -457,7 +473,7 @@ pub const FINDING_CODE_RANK: [&str; 7] = [
     "MISSING_EVIDENCE",
 ];
 
-/// Slice-2 `(code, severity)` contract — the only pairs a Slice-2 run may hold.
+/// Slice-2 `(code, severity)` contract — the only pairs a schema-2 run may hold.
 pub const SLICE2_FINDING_SEVERITY: [(&str, &str); 5] = [
     ("UNRESOLVED_COUNTER_ACCOUNT", "blocking"),
     ("UNMAPPED_CATEGORY", "blocking"),
@@ -465,6 +481,23 @@ pub const SLICE2_FINDING_SEVERITY: [(&str, &str); 5] = [
     ("UNSPECIFIED_TIMBER_SALE", "blocking"),
     ("MISSING_EVIDENCE", "warning"),
 ];
+
+/// Slice-3 `(code, severity)` contract — the pairs a schema-3 run may hold
+/// (the five structural pairs plus the two VAT findings, both blocking).
+pub const SLICE3_FINDING_SEVERITY: [(&str, &str); 7] = [
+    ("UNRESOLVED_VAT", "blocking"),
+    ("UNRESOLVED_COUNTER_ACCOUNT", "blocking"),
+    ("UNMAPPED_CATEGORY", "blocking"),
+    ("LEGACY_INCOME_RECEIPT", "blocking"),
+    ("UNSPECIFIED_TIMBER_SALE", "blocking"),
+    ("VAT_MISMATCH", "blocking"),
+    ("MISSING_EVIDENCE", "warning"),
+];
+
+/// Whether a schema version holds engine-run tables.
+fn is_run_schema(schema: i32) -> bool {
+    schema == WORKSPACE_SCHEMA_ENGINE || schema == WORKSPACE_SCHEMA_DECISIONS
+}
 
 /// The locked lifecycle as persisted text.
 pub const STATUSES: [&str; 3] = ["Automatic", "Conditional", "Manual"];
@@ -547,7 +580,8 @@ pub struct PersistedFinding {
     pub question: Option<String>,
 }
 
-/// One `decision_lines` row — readback shape only; Slice 2 never writes one.
+/// One `decision_lines` row. A schema-2 run carries zero line rows forever;
+/// a schema-3 run (Slice 3) may persist them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedLine {
     pub case_seq: i32,
@@ -632,10 +666,10 @@ impl Workspace {
                 .query_row("SELECT workspace_schema FROM workspace_meta", [], |r| {
                     r.get(0)
                 })?;
-        if found != WORKSPACE_SCHEMA && found != WORKSPACE_SCHEMA_ENGINE {
+        if found != WORKSPACE_SCHEMA && !is_run_schema(found) {
             return Err(WorkspaceError::SchemaMismatch {
                 found,
-                expected: WORKSPACE_SCHEMA_ENGINE,
+                expected: WORKSPACE_SCHEMA_DECISIONS,
             });
         }
         let snapshots = self.snapshot_count()?;
@@ -644,7 +678,7 @@ impl Workspace {
                 "snapshot_meta must have 0 or 1 rows, found {snapshots}"
             )));
         }
-        if found == WORKSPACE_SCHEMA_ENGINE {
+        if is_run_schema(found) {
             self.verify_engine_container(snapshots)?;
         }
         Ok(())
@@ -763,17 +797,18 @@ impl Workspace {
     /// per table, explicit `flush()`, commit only after every appender
     /// succeeded; any append or flush error rolls everything back.
     pub fn ingest(&mut self, raw_json: &[u8]) -> Result<IngestOutcome, WorkspaceError> {
-        // Schema gate before anything else (Slice 2 §5.6): schema 1 ingests,
-        // schema 2 is an evidence container (digest comparison only, never a
-        // write), anything else is unsupported and refused before parse,
-        // Appender or transaction.
-        match self.schema_version()? {
+        // Schema gate before anything else: schema 1 → normal ingest;
+        // schema 2 | schema 3 → run containers, digest comparison only, never
+        // a write; any other schema → refused before parse, Appender or
+        // transaction.
+        let schema = self.schema_version()?;
+        match schema {
             WORKSPACE_SCHEMA => {}
-            WORKSPACE_SCHEMA_ENGINE => {
+            WORKSPACE_SCHEMA_ENGINE | WORKSPACE_SCHEMA_DECISIONS => {
                 return match self.snapshot_count()? {
-                    0 => Err(WorkspaceError::Corrupt(
-                        "schema 2 workspace without a snapshot cannot be ingested into".to_string(),
-                    )),
+                    0 => Err(WorkspaceError::Corrupt(format!(
+                        "schema {schema} workspace without a snapshot cannot be ingested into"
+                    ))),
                     1 => {
                         let digest = self.snapshot_digest(raw_json)?;
                         let existing = self.snapshot_sha256()?;
@@ -796,7 +831,7 @@ impl Workspace {
             found => {
                 return Err(WorkspaceError::SchemaMismatch {
                     found,
-                    expected: WORKSPACE_SCHEMA_ENGINE,
+                    expected: WORKSPACE_SCHEMA_DECISIONS,
                 })
             }
         }
@@ -1055,15 +1090,16 @@ impl Workspace {
             .query_row("SELECT count(*) FROM engine_run_meta", [], |r| r.get(0))?)
     }
 
-    /// Schema-2 container checks (Slice 2 §E.1): the four tables exist,
-    /// `engine_run_meta` has 0 or 1 rows, and a run row requires exactly one
-    /// snapshot whose digest it names. Deeper checks live in `verify_run`.
+    /// The common schema-2 / schema-3 run-container check: the four engine
+    /// tables exist, `engine_run_meta` has 0 or 1 rows, and a run row requires
+    /// `run_seq == 0` and exactly one snapshot whose digest it names. Deeper
+    /// checks live in `verify_run`.
     fn verify_engine_container(&self, snapshots: i64) -> Result<(), WorkspaceError> {
         let tables = self.table_names()?;
         for t in SCHEMA_V2_TABLES {
             if !tables.iter().any(|n| n == t) {
                 return Err(WorkspaceError::Corrupt(format!(
-                    "schema 2 workspace lacks table {t}"
+                    "run-schema workspace lacks table {t}"
                 )));
             }
         }
@@ -1107,7 +1143,7 @@ impl Workspace {
 
     /// Whether this workspace holds a persisted engine run.
     pub fn engine_state(&self) -> Result<EngineState, WorkspaceError> {
-        if self.schema_version()? != WORKSPACE_SCHEMA_ENGINE {
+        if !is_run_schema(self.schema_version()?) {
             return Ok(EngineState::NotRun);
         }
         match self.run_row_count()? {
@@ -1120,7 +1156,7 @@ impl Workspace {
     }
 
     fn require_run(&self) -> Result<(), WorkspaceError> {
-        if self.schema_version()? != WORKSPACE_SCHEMA_ENGINE {
+        if !is_run_schema(self.schema_version()?) {
             return Err(WorkspaceError::NotRun);
         }
         match self.run_row_count()? {
@@ -1266,13 +1302,15 @@ impl Workspace {
     /// precondition is enforced here, before any mutation, on the input as
     /// given (nothing is sorted or normalised). Then exactly one transaction:
     /// transactional DDL → Appender(accounting_cases) → Appender(findings) →
-    /// digest → INSERT engine_run_meta → workspace_schema = 2 → COMMIT; any
-    /// error rolls back to the exact schema-1 state.
+    /// Appender(decision_lines) → digest → INSERT engine_run_meta →
+    /// workspace_schema = 3 → COMMIT; any error rolls back to the exact
+    /// schema-1 state.
     pub fn persist_run(
         &mut self,
         provenance: &RunProvenance,
         cases: &[PersistedCase],
         findings: &[PersistedFinding],
+        lines: &[PersistedLine],
     ) -> Result<RunMeta, WorkspaceError> {
         // 1–3. State: snapshot, schema, no stray engine tables.
         let snapshots = self.snapshot_count()?;
@@ -1285,14 +1323,14 @@ impl Workspace {
                 "snapshot_meta must have exactly 1 row for a run, found {snapshots}"
             )));
         }
-        if schema == WORKSPACE_SCHEMA_ENGINE {
+        if is_run_schema(schema) {
             return match self.run_row_count()? {
                 1 => Err(WorkspaceError::AlreadyRun {
                     decision_sha256: self.read_run_meta()?.decision_sha256,
                 }),
-                0 => Err(WorkspaceError::Corrupt(
-                    "schema 2 workspace without a run row cannot receive a run".to_string(),
-                )),
+                0 => Err(WorkspaceError::Corrupt(format!(
+                    "schema {schema} workspace without a run row cannot receive a run"
+                ))),
                 n => Err(WorkspaceError::Corrupt(format!(
                     "engine_run_meta must have 0 or 1 rows, found {n}"
                 ))),
@@ -1301,7 +1339,7 @@ impl Workspace {
         if schema != WORKSPACE_SCHEMA {
             return Err(WorkspaceError::SchemaMismatch {
                 found: schema,
-                expected: WORKSPACE_SCHEMA_ENGINE,
+                expected: WORKSPACE_SCHEMA_DECISIONS,
             });
         }
         let tables = self.table_names()?;
@@ -1324,11 +1362,21 @@ impl Workspace {
         // 5–8. Structural + source-mirror checks on the input as given.
         let receipts = self.read_receipts()?;
         let incomes = self.read_income_entries()?;
-        check_run_rows(provenance, cases, findings, &[], &receipts, &incomes)?;
+        // This build writes schema 3 (Slice-3 decision evidence): validate the
+        // input against the schema-3 contract before any mutation.
+        check_run_rows(
+            WORKSPACE_SCHEMA_DECISIONS,
+            provenance,
+            cases,
+            findings,
+            lines,
+            &receipts,
+            &incomes,
+        )?;
 
         // The transaction.
         let tx = self.conn.transaction()?;
-        let result = write_run(&tx, provenance, cases, findings);
+        let result = write_run(&tx, provenance, cases, findings, lines);
         match result {
             Ok(decision_sha256) => {
                 tx.commit()?;
@@ -1344,9 +1392,11 @@ impl Workspace {
         }
     }
 
-    /// Full integrity check of a persisted run (Slice 2 §G): container
-    /// state, source mirror against the v1 rows, structural finding/status
-    /// contract, zero lines, and the recomputed digest. Nothing is healed.
+    /// Full integrity check of a persisted run: container state, source
+    /// mirror against the v1 rows, the structural finding/status contract,
+    /// the line contract of the stored schema (schema 2 → zero lines forever;
+    /// schema 3 → the persisted-line invariants), and the recomputed digest.
+    /// Nothing is healed.
     pub fn verify_run(&self) -> Result<RunMeta, WorkspaceError> {
         self.require_run()?;
         let snapshots = self.snapshot_count()?;
@@ -1359,12 +1409,14 @@ impl Workspace {
                 meta.provenance.ruleset_status
             )));
         }
+        let schema = self.schema_version()?;
         let receipts = self.read_receipts()?;
         let incomes = self.read_income_entries()?;
         let cases = self.read_cases()?;
         let findings = self.read_findings()?;
         let lines = self.read_decision_lines()?;
         check_run_rows(
+            schema,
             &meta.provenance,
             &cases,
             &findings,
@@ -1697,6 +1749,7 @@ fn write_run(
     provenance: &RunProvenance,
     cases: &[PersistedCase],
     findings: &[PersistedFinding],
+    lines: &[PersistedLine],
 ) -> Result<String, WorkspaceError> {
     tx.execute_batch(SCHEMA_V2_DDL)?;
     {
@@ -1753,9 +1806,23 @@ fn write_run(
         }
         app.flush()?;
     }
+    {
+        let mut app = tx.appender("decision_lines")?;
+        for l in lines {
+            app.append_row(params![
+                l.case_seq,
+                l.line_no,
+                l.account.as_str(),
+                l.role.as_str(),
+                l.debit.0,
+                l.credit.0,
+            ])?;
+        }
+        app.flush()?;
+    }
     let decision_sha256 = sha256_via(
         tx,
-        &canonical_decision_text(provenance, cases, findings, &[]),
+        &canonical_decision_text(provenance, cases, findings, lines),
     )?;
     tx.execute(
         "INSERT INTO engine_run_meta (run_seq, snapshot_sha256, engine_version, chart_id, chart_version, \
@@ -1776,7 +1843,7 @@ fn write_run(
     )?;
     tx.execute(
         "UPDATE workspace_meta SET workspace_schema = ?",
-        params![WORKSPACE_SCHEMA_ENGINE],
+        params![WORKSPACE_SCHEMA_DECISIONS],
     )?;
     Ok(decision_sha256)
 }
@@ -1976,10 +2043,12 @@ fn rank_of(code: &str) -> Option<usize> {
     FINDING_CODE_RANK.iter().position(|c| *c == code)
 }
 
-/// Every structural rule a Slice-2 run must satisfy, applied to rows exactly
-/// as given (input to `persist_run`, or readback in `verify_run`). Nothing
-/// is sorted or repaired; the first violation is returned.
+/// Every structural rule a run of a supported schema (2 or 3) must satisfy,
+/// applied to rows exactly as given (input to `persist_run`, or readback in
+/// `verify_run`). Nothing is sorted or repaired; the first violation is
+/// returned.
 fn check_run_rows(
+    schema: i32,
     provenance: &RunProvenance,
     cases: &[PersistedCase],
     findings: &[PersistedFinding],
@@ -1987,13 +2056,21 @@ fn check_run_rows(
     receipts: &[ReceiptRow],
     incomes: &[IncomeRow],
 ) -> Result<(), WorkspaceError> {
-    // Zero lines in Slice 2.
-    if !lines.is_empty() {
+    // Schema 2 (Slice-2 evidence) never carries lines; schema 3 may.
+    if schema == WORKSPACE_SCHEMA_ENGINE && !lines.is_empty() {
         return Err(corrupt(format!(
-            "decision_lines must be empty in Slice 2, found {}",
+            "decision_lines must be empty in a schema 2 run, found {}",
             lines.len()
         )));
     }
+    if schema != WORKSPACE_SCHEMA_ENGINE && schema != WORKSPACE_SCHEMA_DECISIONS {
+        return Err(corrupt(format!("schema {schema} is not a run schema")));
+    }
+    let allowed_pairs: &[(&str, &str)] = if schema == WORKSPACE_SCHEMA_ENGINE {
+        &SLICE2_FINDING_SEVERITY
+    } else {
+        &SLICE3_FINDING_SEVERITY
+    };
     // Count and dense sequence.
     if cases.len() != receipts.len() + incomes.len() {
         return Err(corrupt(format!(
@@ -2173,9 +2250,9 @@ fn check_run_rows(
         let Some(rank) = rank_of(&f.code) else {
             return Err(corrupt(format!("finding {idx}: unknown code {:?}", f.code)));
         };
-        let Some((_, severity)) = SLICE2_FINDING_SEVERITY.iter().find(|(c, _)| *c == f.code) else {
+        let Some((_, severity)) = allowed_pairs.iter().find(|(c, _)| *c == f.code) else {
             return Err(corrupt(format!(
-                "finding {idx}: code {} is not allowed in a Slice-2 run",
+                "finding {idx}: code {} is not allowed in a schema {schema} run",
                 f.code
             )));
         };
@@ -2208,6 +2285,78 @@ fn check_run_rows(
         prev_seq = Some(f.case_seq);
         prev_rank = Some(rank);
         expected_no += 1;
+    }
+    // Lines (schema 3): only what persisted evidence can prove — orphan,
+    // density, shape, role, sides, balance, status relations. The proposal
+    // guard is a construction-time invariant and is NOT re-evaluated here.
+    let mut line_counts = vec![0usize; cases.len()];
+    let mut debit_sum = vec![0i64; cases.len()];
+    let mut credit_sum = vec![0i64; cases.len()];
+    let mut prev_line: Option<(i32, i32)> = None;
+    for (idx, l) in lines.iter().enumerate() {
+        if l.case_seq < 0 || (l.case_seq as usize) >= cases.len() {
+            return Err(corrupt(format!(
+                "line {idx}: orphan case_seq {}",
+                l.case_seq
+            )));
+        }
+        let ci = l.case_seq as usize;
+        let expected_line_no = match prev_line {
+            Some((seq, no)) if seq == l.case_seq => no + 1,
+            Some((seq, _)) if l.case_seq < seq => {
+                return Err(corrupt(format!(
+                    "line {idx}: case_seq {} out of order",
+                    l.case_seq
+                )))
+            }
+            _ => 0,
+        };
+        if l.line_no != expected_line_no {
+            return Err(corrupt(format!(
+                "line {idx}: line_no {} but expected {expected_line_no} (dense per case)",
+                l.line_no
+            )));
+        }
+        if !is_account_number(&l.account) {
+            return Err(corrupt(format!(
+                "line {idx}: account {:?} is not four digits",
+                l.account
+            )));
+        }
+        if !LINE_ROLES.contains(&l.role.as_str()) {
+            return Err(corrupt(format!("line {idx}: unknown role {:?}", l.role)));
+        }
+        if l.debit.0 < 0 || l.credit.0 < 0 {
+            return Err(corrupt(format!("line {idx}: negative side")));
+        }
+        if (l.debit.0 > 0) == (l.credit.0 > 0) {
+            return Err(corrupt(format!(
+                "line {idx}: exactly one side must be positive"
+            )));
+        }
+        debit_sum[ci] = debit_sum[ci]
+            .checked_add(l.debit.0)
+            .ok_or_else(|| corrupt(format!("line {idx}: debit sum overflow")))?;
+        credit_sum[ci] = credit_sum[ci]
+            .checked_add(l.credit.0)
+            .ok_or_else(|| corrupt(format!("line {idx}: credit sum overflow")))?;
+        line_counts[ci] += 1;
+        prev_line = Some((l.case_seq, l.line_no));
+    }
+    for (ci, c) in cases.iter().enumerate() {
+        if line_counts[ci] > 0 {
+            if c.status == "Manual" {
+                return Err(corrupt(format!("case {ci}: Manual case carries lines")));
+            }
+            if debit_sum[ci] != credit_sum[ci] {
+                return Err(corrupt(format!(
+                    "case {ci}: lines do not balance (debit {} credit {})",
+                    debit_sum[ci], credit_sum[ci]
+                )));
+            }
+        } else if c.status == "Automatic" {
+            return Err(corrupt(format!("case {ci}: Automatic case without lines")));
+        }
     }
     Ok(())
 }

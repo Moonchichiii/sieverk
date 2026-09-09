@@ -16,7 +16,20 @@
 //!
 //! Slice 2 adds `run_engine`: the same projection + assessment, mapped
 //! losslessly to the workspace's persisted rows and written through
-//! `Workspace::persist_run` (one transaction, schema v2, zero lines).
+//! `Workspace::persist_run` (one transaction).
+//!
+//! Slice 3 (first receipt-line sub-slice, FINAL implementation lock 2026-09-09)
+//! adds `decide_cases`: for receipts with `rounding == 0`, a VAT-registered
+//! entity, a usable rule case with an ingående/full/single-rate VAT rule and a
+//! counter account, E1 verifies the source VAT with strict half-up integer
+//! arithmetic (Formula B) and E2 proposes exactly three lines — expense D net,
+//! input VAT D source vat, counter K total. Every ineligible branch emits zero
+//! lines: the branches the lock names as Manual (non-registered entity,
+//! `ingen`/non-ingående/zero-rate VAT rules) become Manual; VAT automation
+//! that is genuinely unresolved or mathematically mismatched gets its Blocking
+//! finding and becomes Manual; the E3-deferred non-zero-rounding path keeps
+//! its structural status. No branch beyond the lock is invented. Income
+//! lines, rounding lines, E3–E6 and voucher identity are not implemented.
 //!
 //! Money stays `Ore(i64)`; every check uses checked i64 arithmetic. Nothing
 //! here ever reads the snapshot JSON again.
@@ -27,10 +40,10 @@ use std::fmt;
 use chrono::NaiveDate;
 
 use crate::money::Ore;
-use crate::ruleset::{AccountingCase as RuleCase, CounterRule, Masterdata};
+use crate::ruleset::{AccountingCase as RuleCase, CounterRule, Masterdata, VatRule};
 use crate::workspace::{
-    EngineState, EntityContext, PersistedCase, PersistedFinding, RunMeta, RunProvenance, Workspace,
-    WorkspaceError, WORKSPACE_SCHEMA_ENGINE,
+    EngineState, EntityContext, PersistedCase, PersistedFinding, PersistedLine, RunMeta,
+    RunProvenance, Workspace, WorkspaceError, WORKSPACE_SCHEMA,
 };
 
 // ---------------------------------------------------------------------------
@@ -757,10 +770,339 @@ pub fn assess_cases(
 }
 
 // ---------------------------------------------------------------------------
-// Slice 2 — run_engine: project → assess → persist (zero lines)
+// Slice 3 — first receipt-line sub-slice: E1 (Formula B) + E2 positive branch
 // ---------------------------------------------------------------------------
 
-/// What a completed run produced. `lines` is always 0 in Slice 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineRole {
+    Expense,
+    Income,
+    InputVat,
+    OutputVat,
+    Rounding,
+    Counter,
+}
+
+impl LineRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Expense => "expense",
+            Self::Income => "income",
+            Self::InputVat => "input_vat",
+            Self::OutputVat => "output_vat",
+            Self::Rounding => "rounding",
+            Self::Counter => "counter",
+        }
+    }
+}
+
+/// One proposed accounting line. Two non-negative sides, exactly one > 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposedLine {
+    pub line_no: i32,
+    pub account: String,
+    pub role: LineRole,
+    pub debit: Ore,
+    pub credit: Ore,
+}
+
+/// The decision for one case: the structural assessment plus, for the
+/// first receipt sub-slice, E1/E2 findings and proposed lines.
+/// Invariants: Manual ⇒ lines empty; any Blocking ⇒ Manual; lines balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountingDecision {
+    pub case_seq: i32,
+    pub status: DecisionStatus,
+    pub rule_case_id: Option<String>,
+    pub vat_rule_id: Option<String>,
+    pub counter_rule: Option<CounterRuleRef>,
+    pub lines: Vec<ProposedLine>,
+    pub findings: Vec<Finding>,
+}
+
+/// Why a receipt does not reach line construction in this sub-slice.
+enum Skip {
+    /// The structural outcome stands (structural status kept, zero lines, no
+    /// finding): an already-blocked/Manual case, an unusable rule case or
+    /// counter row, or the E3-deferred non-zero-rounding path.
+    Silent,
+    /// A known but not implemented VAT branch (FINAL lock §2.2 / §2.4):
+    /// status Manual, zero lines, no finding — nothing is claimed mismatched.
+    Manual,
+    /// Known-unresolved VAT automation (L-FIND) — Blocking finding, Manual.
+    UnresolvedVat(String),
+    /// E1 mathematical mismatch — Blocking finding, Manual.
+    VatMismatch(String),
+}
+
+/// Re-sort a case's findings by fixed code rank and renumber densely.
+fn renumber(findings: &mut [Finding]) {
+    findings.sort_by_key(|f| f.code);
+    for (i, f) in findings.iter_mut().enumerate() {
+        f.finding_no = i as i32;
+    }
+}
+
+/// E1, Formula B (FINAL lock §3.2): expected VAT = (net × rate + 50) / 100
+/// in checked i64 — Skatteverket's ordinary half-up rounding to whole öre.
+fn expected_vat_ore(case_seq: i32, net: Ore, rate: i64) -> Result<i64, EngineError> {
+    let scaled = net
+        .0
+        .checked_mul(rate)
+        .ok_or_else(|| EngineError::MoneyInvariant {
+            case_seq,
+            detail: "net × rate overflows i64".to_string(),
+        })?;
+    let rounded = scaled
+        .checked_add(50)
+        .ok_or_else(|| EngineError::MoneyInvariant {
+            case_seq,
+            detail: "net × rate + 50 overflows i64".to_string(),
+        })?;
+    Ok(rounded / 100)
+}
+
+/// The single positive rate of a rule usable for this sub-slice, or a Skip.
+fn single_positive_rate(rule: &VatRule) -> Result<i64, Skip> {
+    if rule.manual_review {
+        return Err(Skip::UnresolvedVat(format!(
+            "vat rule {} requires manual review",
+            rule.id
+        )));
+    }
+    if rule.deductibility == "manuell" {
+        return Err(Skip::UnresolvedVat(format!(
+            "vat rule {} has manual deductibility",
+            rule.id
+        )));
+    }
+    if rule.rates.len() != 1 {
+        return Err(Skip::UnresolvedVat(format!(
+            "vat rule {} allows {} rates",
+            rule.id,
+            rule.rates.len()
+        )));
+    }
+    // Known but out-of-scope branches (§2.4): Manual, zero lines, no finding.
+    if rule.deductibility != "full" || rule.direction != "ingående" {
+        return Err(Skip::Manual);
+    }
+    match rule.rates[0].as_str() {
+        "25" => Ok(25),
+        "12" => Ok(12),
+        "6" => Ok(6),
+        _ => Err(Skip::Manual), // "0" (validated set) — not a positive-VAT branch
+    }
+}
+
+/// The three-line construction for one eligible receipt, or the Skip that
+/// keeps it fail-closed. Structural failures are `EngineError`s.
+fn receipt_lines(
+    case: &EngineCase,
+    assessment: &CaseAssessment,
+    entity: &EntityContext,
+    masterdata: &Masterdata,
+) -> Result<Result<Vec<ProposedLine>, Skip>, EngineError> {
+    let seq = case.case_seq;
+    let SourceFacts::Receipt {
+        total,
+        vat,
+        rounding,
+        net,
+        payment_method,
+        ..
+    } = &case.facts
+    else {
+        return Ok(Err(Skip::Silent));
+    };
+    // §2.1 existing Blocking finding ⇒ no E1, no lines.
+    if assessment
+        .findings
+        .iter()
+        .any(|f| f.severity == Severity::Blocking)
+    {
+        return Ok(Err(Skip::Silent));
+    }
+    // A ceiling of Manual (e.g. a Manual rule/counter automation) never carries lines.
+    if assessment.status_ceiling == DecisionStatus::Manual {
+        return Ok(Err(Skip::Silent));
+    }
+    // §2.2 E2 entity gate: any value but "yes" is outside the implemented
+    // branch — Manual, zero lines, no invented gross-expense rule or finding.
+    if entity.vat_registered.as_deref() != Some("yes") {
+        return Ok(Err(Skip::Manual));
+    }
+    // §2.3 rule case with account and a VAT rule id.
+    let Some(rule) = default_rule_case(case, masterdata) else {
+        return Ok(Err(Skip::Silent));
+    };
+    let Some(expense_account) = rule.account.as_deref() else {
+        return Ok(Err(Skip::Silent));
+    };
+    let Some(vat_rule_id) = rule.vat_rule.as_deref() else {
+        return Ok(Err(Skip::UnresolvedVat(format!(
+            "rule case {} has no vat rule",
+            rule.case_id
+        ))));
+    };
+    // §2.4 VAT rule resolution and positive-branch gate.
+    let Some(vat_rule) = masterdata.vat.rules.iter().find(|r| r.id == vat_rule_id) else {
+        return Err(EngineError::Masterdata {
+            case_seq: seq,
+            detail: format!("vat rule {vat_rule_id:?} does not resolve"),
+        });
+    };
+    let rate = match single_positive_rate(vat_rule) {
+        Ok(r) => r,
+        Err(skip) => return Ok(Err(skip)),
+    };
+    // §2.5 counter row with an account (the locked Slice-1 selection).
+    let counter_account =
+        match select_counter_row(case, payment_method.as_deref(), entity, masterdata)? {
+            Ok(row) => match row.account.as_deref() {
+                Some(a) => a.to_string(),
+                None => return Ok(Err(Skip::Silent)),
+            },
+            Err(_) => return Ok(Err(Skip::Silent)),
+        };
+    // §2.6 rounding gate.
+    if rounding.0 != 0 {
+        return Ok(Err(Skip::Silent));
+    }
+    // §3 E1 preconditions and Formula B.
+    if net.0 <= 0 || total.0 <= 0 || vat.0 < 0 {
+        return Ok(Err(Skip::Silent));
+    }
+    let expected = expected_vat_ore(seq, *net, rate)?;
+    if vat.0 == 0 {
+        return Ok(Err(if expected > 0 {
+            Skip::VatMismatch(format!(
+                "source vat 0 but expected {expected} öre at {rate} %"
+            ))
+        } else {
+            Skip::UnresolvedVat(
+                "expected vat is zero at this net amount; a zero input-VAT line is not representable"
+                    .to_string(),
+            )
+        }));
+    }
+    if vat.0 != expected {
+        return Ok(Err(Skip::VatMismatch(format!(
+            "source vat {} does not equal expected {expected} öre at {rate} %",
+            vat.0
+        ))));
+    }
+    // §2.7 proposal guard as a real proposal (effective non-Manual status).
+    let status = assessment.status_ceiling;
+    for account in [
+        expense_account,
+        vat_rule.vat_account.as_str(),
+        counter_account.as_str(),
+    ] {
+        proposal_guard(seq, account, status, entity, masterdata)?;
+    }
+    // §4 E2: exactly three lines; balance re-checked in checked i64.
+    let sum = net
+        .0
+        .checked_add(vat.0)
+        .ok_or_else(|| EngineError::MoneyInvariant {
+            case_seq: seq,
+            detail: "net + vat overflows i64".to_string(),
+        })?;
+    if sum != total.0 {
+        return Err(EngineError::MoneyInvariant {
+            case_seq: seq,
+            detail: format!("net {} + vat {} != total {} (öre)", net.0, vat.0, total.0),
+        });
+    }
+    Ok(Ok(vec![
+        ProposedLine {
+            line_no: 0,
+            account: expense_account.to_string(),
+            role: LineRole::Expense,
+            debit: *net,
+            credit: Ore(0),
+        },
+        ProposedLine {
+            line_no: 1,
+            account: vat_rule.vat_account.clone(),
+            role: LineRole::InputVat,
+            debit: *vat,
+            credit: Ore(0),
+        },
+        ProposedLine {
+            line_no: 2,
+            account: counter_account,
+            role: LineRole::Counter,
+            debit: Ore(0),
+            credit: *total,
+        },
+    ]))
+}
+
+/// Slice 3 decision step over the structural assessment. Receipts that pass
+/// every locked gate get three balanced lines; every other case keeps its
+/// structural outcome with zero lines. Never invents accounts or amounts.
+pub fn decide_cases(
+    cases: &[EngineCase],
+    assessments: &[CaseAssessment],
+    entity: &EntityContext,
+    masterdata: &Masterdata,
+) -> Result<Vec<AccountingDecision>, EngineError> {
+    let mut out = Vec::with_capacity(cases.len());
+    for (case, a) in cases.iter().zip(assessments) {
+        let mut status = a.status_ceiling;
+        let mut findings = a.findings.clone();
+        let lines = match case.source {
+            CaseSource::Income => Vec::new(),
+            CaseSource::Receipt => match receipt_lines(case, a, entity, masterdata)? {
+                Ok(lines) => lines,
+                Err(Skip::Silent) => Vec::new(),
+                Err(Skip::Manual) => {
+                    status = DecisionStatus::Manual;
+                    Vec::new()
+                }
+                Err(Skip::UnresolvedVat(message)) => {
+                    findings.push(finding(
+                        FindingCode::UnresolvedVat,
+                        Severity::Blocking,
+                        message,
+                        None,
+                    ));
+                    status = DecisionStatus::Manual;
+                    Vec::new()
+                }
+                Err(Skip::VatMismatch(message)) => {
+                    findings.push(finding(
+                        FindingCode::VatMismatch,
+                        Severity::Blocking,
+                        message,
+                        None,
+                    ));
+                    status = DecisionStatus::Manual;
+                    Vec::new()
+                }
+            },
+        };
+        renumber(&mut findings);
+        out.push(AccountingDecision {
+            case_seq: a.case_seq,
+            status,
+            rule_case_id: a.rule_case_id.clone(),
+            vat_rule_id: a.vat_rule_id.clone(),
+            counter_rule: a.counter_rule.clone(),
+            lines,
+            findings,
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 — run_engine: project → assess → persist
+// ---------------------------------------------------------------------------
+
+/// What a completed run produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEvidence {
     pub run: RunMeta,
@@ -769,16 +1111,22 @@ pub struct RunEvidence {
     pub lines: usize,
 }
 
-/// Lossless mapping from the Slice-1 types to the persisted row shapes.
+/// Lossless mapping from the engine types to the persisted row shapes.
 /// One `PersistedCase` per `EngineCase`, one `PersistedFinding` per
-/// `Finding`, in the order given. Nothing is computed here.
+/// `Finding`, one `PersistedLine` per `ProposedLine`, in the order given.
+/// Nothing is computed here.
 fn to_persisted(
     cases: &[EngineCase],
-    assessments: &[CaseAssessment],
-) -> (Vec<PersistedCase>, Vec<PersistedFinding>) {
+    decisions: &[AccountingDecision],
+) -> (
+    Vec<PersistedCase>,
+    Vec<PersistedFinding>,
+    Vec<PersistedLine>,
+) {
     let mut rows = Vec::with_capacity(cases.len());
     let mut findings = Vec::new();
-    for (case, a) in cases.iter().zip(assessments) {
+    let mut lines = Vec::new();
+    for (case, a) in cases.iter().zip(decisions) {
         let (source, subject) = match case.source {
             CaseSource::Receipt => ("receipt", case.subject.clone()),
             CaseSource::Income => ("income", case.subject.clone()),
@@ -821,7 +1169,7 @@ fn to_persisted(
                 .counter_rule
                 .as_ref()
                 .and_then(|r| r.bookkeeping_method.clone()),
-            status: a.status_ceiling.as_str().to_string(),
+            status: a.status.as_str().to_string(),
         };
         match &case.facts {
             SourceFacts::Receipt {
@@ -870,8 +1218,18 @@ fn to_persisted(
                 question: f.question.clone(),
             });
         }
+        for l in &a.lines {
+            lines.push(PersistedLine {
+                case_seq: a.case_seq,
+                line_no: l.line_no,
+                account: l.account.clone(),
+                role: l.role.as_str().to_string(),
+                debit: l.debit,
+                credit: l.credit,
+            });
+        }
     }
-    (rows, findings)
+    (rows, findings, lines)
 }
 
 /// Content identity of this run: the workspace's snapshot digest, this
@@ -890,9 +1248,9 @@ fn provenance_from(masterdata: &Masterdata, snapshot_sha256: String) -> RunProve
     }
 }
 
-/// One engine run on a workspace: refuse a rerun, project, assess, map
-/// losslessly, persist through `Workspace::persist_run` (which re-checks
-/// every precondition itself). Zero accounting lines in Slice 2.
+/// One engine run on a workspace: refuse a rerun, project, assess, decide
+/// (Slice 3 receipt lines), map losslessly, persist through
+/// `Workspace::persist_run` (which re-checks every precondition itself).
 pub fn run_engine(
     workspace: &mut Workspace,
     masterdata: &Masterdata,
@@ -904,25 +1262,27 @@ pub fn run_engine(
             }));
         }
         EngineState::NotRun => {
-            // A schema-2 container without a run row is a recovery state:
+            // A run-schema container without a run row is a recovery state:
             // readable (NotRun), never runnable — only schema 1 may proceed.
-            if workspace.schema_version()? == WORKSPACE_SCHEMA_ENGINE {
-                return Err(EngineError::Workspace(WorkspaceError::Corrupt(
-                    "schema 2 workspace without a run row cannot receive a run".to_string(),
-                )));
+            let schema = workspace.schema_version()?;
+            if schema != WORKSPACE_SCHEMA {
+                return Err(EngineError::Workspace(WorkspaceError::Corrupt(format!(
+                    "schema {schema} workspace without a run row cannot receive a run"
+                ))));
             }
         }
     }
     let entity = workspace.read_entity()?;
     let cases = project_cases(workspace)?;
     let assessments = assess_cases(&cases, &entity, masterdata)?;
-    let (rows, findings) = to_persisted(&cases, &assessments);
+    let decisions = decide_cases(&cases, &assessments, &entity, masterdata)?;
+    let (rows, findings, lines) = to_persisted(&cases, &decisions);
     let provenance = provenance_from(masterdata, workspace.snapshot_sha256()?);
-    let run = workspace.persist_run(&provenance, &rows, &findings)?;
+    let run = workspace.persist_run(&provenance, &rows, &findings, &lines)?;
     Ok(RunEvidence {
         run,
         cases: rows.len(),
         findings: findings.len(),
-        lines: 0,
+        lines: lines.len(),
     })
 }
