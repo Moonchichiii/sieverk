@@ -12,6 +12,7 @@ pub mod engine;
 pub mod metadata;
 pub mod money;
 pub mod ruleset;
+pub mod sie_writer;
 pub mod snapshot;
 pub mod sru;
 pub mod tokenizer;

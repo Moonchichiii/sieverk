@@ -1,13 +1,18 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use chrono::NaiveDate;
 
 use sieverk::accounts::{parse_accounts, AccountData};
 use sieverk::decode_sie_bytes;
+use sieverk::engine::run_engine;
 use sieverk::metadata::{parse_metadata, Metadata};
 use sieverk::money::Ore;
 use sieverk::ruleset::load_masterdata;
+use sieverk::sie_writer::{write_sie4i, ExportMetadata, ProgramId};
 use sieverk::snapshot::{parse_snapshot, Snapshot};
 use sieverk::validator::{validate, Report, Severity};
 use sieverk::vouchers::{parse_vouchers, VoucherData};
@@ -65,6 +70,16 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Some("export-sie") => {
+            return match parse_export_options(&argv[1..]) {
+                Ok(opts) => finish(export_sie(&opts)),
+                Err(e) => {
+                    eprintln!("{e}");
+                    eprintln!("{EXPORT_USAGE}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         _ => {}
     }
     // Masterdata takes an explicit root — there is no default root, by
@@ -95,6 +110,7 @@ fn main() -> ExitCode {
             eprintln!("       sieverk inspect-masterdata --root <generated-dir>");
             eprintln!("       sieverk ingest --snapshot <snapshot.json> --workspace <file.duckdb>");
             eprintln!("       sieverk inspect-workspace --workspace <file.duckdb>");
+            eprintln!("{EXPORT_USAGE}");
             return ExitCode::FAILURE;
         }
     };
@@ -427,11 +443,121 @@ fn inspect_workspace(workspace: &Path) -> Result<String, String> {
     ))
 }
 
+const EXPORT_USAGE: &str =
+    "usage: sieverk export-sie --snapshot <snapshot.json> --root <generated-dir> \
+--workspace <new.duckdb> --out <file.SI> --generated-on YYYY-MM-DD --company-name <text> \
+[--org-number NNNNNN-NNNN]";
+
+/// The complete, explicit input of one `export-sie` run (SV-04 Slice 1).
+#[derive(Debug)]
+struct ExportOptions {
+    snapshot: PathBuf,
+    root: PathBuf,
+    workspace: PathBuf,
+    out: PathBuf,
+    generated_on: NaiveDate,
+    company_name: String,
+    org_number: Option<String>,
+}
+
+/// `--org-number` is the one optional option; everything else goes through
+/// the strict `parse_options` (each exactly once, nothing unknown).
+fn parse_export_options(args: &[String]) -> Result<ExportOptions, String> {
+    let mut rest: Vec<String> = Vec::with_capacity(args.len());
+    let mut org_number: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--org-number" {
+            if org_number.is_some() {
+                return Err("--org-number given more than once".to_string());
+            }
+            match args.get(i + 1) {
+                Some(v) if !v.starts_with("--") => org_number = Some(v.clone()),
+                _ => return Err("--org-number requires a value".to_string()),
+            }
+            i += 2;
+        } else {
+            rest.push(args[i].clone());
+            i += 1;
+        }
+    }
+    let opts = parse_options(
+        &rest,
+        &[
+            "--snapshot",
+            "--root",
+            "--workspace",
+            "--out",
+            "--generated-on",
+            "--company-name",
+        ],
+    )?;
+    let generated_on = NaiveDate::parse_from_str(&opts[4], "%Y-%m-%d")
+        .map_err(|_| format!("--generated-on {:?} is not YYYY-MM-DD", opts[4]))?;
+    if opts[5].trim().is_empty() {
+        return Err("--company-name must not be empty".to_string());
+    }
+    Ok(ExportOptions {
+        snapshot: PathBuf::from(&opts[0]),
+        root: PathBuf::from(&opts[1]),
+        workspace: PathBuf::from(&opts[2]),
+        out: PathBuf::from(&opts[3]),
+        generated_on,
+        company_name: opts[5].clone(),
+        org_number,
+    })
+}
+
+/// `export-sie`: the canonical generation path — snapshot → new workspace →
+/// ingest → masterdata → SV-03 engine (schema 3) → verified run → SV-04
+/// writer → bytes on disk. The output path must not exist. Evidence only on
+/// stdout; no rows, no names beyond what the caller supplied.
+fn export_sie(opts: &ExportOptions) -> Result<String, String> {
+    let raw = fs::read(&opts.snapshot)
+        .map_err(|e| format!("could not read {}: {e}", opts.snapshot.display()))?;
+    let masterdata = load_masterdata(&opts.root).map_err(|e| e.to_string())?;
+    let mut ws = Workspace::create(&opts.workspace).map_err(|e| e.to_string())?;
+    ws.ingest(&raw).map_err(|e| format!("ingest failed: {e}"))?;
+    let evidence = run_engine(&mut ws, &masterdata).map_err(|e| e.to_string())?;
+    let meta = ExportMetadata {
+        company_name: opts.company_name.clone(),
+        org_number: opts.org_number.clone(),
+        generated_on: opts.generated_on,
+        program: ProgramId {
+            name: "SIEverk".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+    let export = write_sie4i(&ws, &masterdata, &meta).map_err(|e| e.to_string())?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&opts.out)
+        .map_err(|e| format!("could not create {}: {e}", opts.out.display()))?;
+    file.write_all(&export.bytes)
+        .map_err(|e| format!("could not write {}: {e}", opts.out.display()))?;
+    ws.close().map_err(|e| e.to_string())?;
+    Ok(format!(
+        "workspace={}\nsnapshot_sha256={}\ndecision_sha256={}\nvouchers={}\naccounts={}\n\
+         bytes={}\nsi_sha256={}\nout={}\n",
+        opts.workspace.display(),
+        evidence.run.provenance.snapshot_sha256,
+        evidence.run.decision_sha256,
+        export.vouchers,
+        export.accounts,
+        export.bytes.len(),
+        export.sha256,
+        opts.out.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ingest_workspace, inspect_snapshot, inspect_workspace, mask_org_number, parse_options,
+        export_sie, ingest_workspace, inspect_snapshot, inspect_workspace, mask_org_number,
+        parse_export_options, parse_options, ExportOptions,
     };
+    use chrono::NaiveDate;
     use sieverk::workspace::{Workspace, WorkspaceError};
     use sieverk::{accounts, decode_sie_bytes, metadata, validator, vouchers};
     use std::path::{Path, PathBuf};
@@ -807,5 +933,102 @@ mod tests {
         assert!(e.contains("unexpected argument extra"), "{e}");
         let e = parse_options(&args(&[]), &["--workspace"]).expect_err("nothing given");
         assert!(e.contains("missing required option --workspace"), "{e}");
+    }
+
+    // -- SV-04 Slice 1: export-sie ---------------------------------------------
+
+    const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
+    const TESTGARDEN_SI_SHA256: &str =
+        "3fc89f8b504f883d0a4444e11e5389c25b99f201b0bfdaf88a65c74a23e20660";
+
+    fn export_opts(name: &str) -> (TempDb, TempDb, ExportOptions) {
+        let db = TempDb::new(name);
+        let out = TempDb::new(&format!("{name}-out"));
+        let out_path = out.path().with_extension("SI");
+        let _ = std::fs::remove_file(&out_path);
+        let opts = ExportOptions {
+            snapshot: PathBuf::from(TESTGARDEN),
+            root: PathBuf::from(SYNTHETIC_ROOT),
+            workspace: db.path().to_path_buf(),
+            out: out_path,
+            generated_on: NaiveDate::from_ymd_opt(2026, 9, 10).expect("date"),
+            company_name: "Testgården".to_string(),
+            org_number: None,
+        };
+        (db, out, opts)
+    }
+
+    #[test]
+    fn cli_export_sie_generates_the_locked_testgarden_file() {
+        let (_db, _out, opts) = export_opts("export");
+        let text = export_sie(&opts).expect("export");
+        let bytes = std::fs::read(&opts.out).expect("out file");
+        assert_eq!(bytes.len(), 441, "{text}");
+        assert!(
+            text.contains(&format!("si_sha256={TESTGARDEN_SI_SHA256}\n")),
+            "{text}"
+        );
+        assert!(
+            text.contains("vouchers=2\n") && text.contains("accounts=4\n"),
+            "{text}"
+        );
+        assert!(text.contains("bytes=441\n"), "{text}");
+        assert!(!text.contains("999999-0006") && !text.contains("Röjarlaget"));
+        // Existing output path is refused; the workspace already exists too.
+        let e = export_sie(&opts).expect_err("second run must refuse");
+        assert!(
+            e.contains("already exists") || e.contains("could not create"),
+            "{e}"
+        );
+        let _ = std::fs::remove_file(&opts.out);
+    }
+
+    #[test]
+    fn cli_export_sie_option_parsing_is_strict() {
+        let base = [
+            "--snapshot",
+            "s.json",
+            "--root",
+            "r",
+            "--workspace",
+            "w.duckdb",
+            "--out",
+            "o.SI",
+            "--generated-on",
+            "2026-09-10",
+            "--company-name",
+            "Testgården",
+        ];
+        let ok = parse_export_options(&args(&base)).expect("complete");
+        assert_eq!(ok.org_number, None);
+        assert_eq!(ok.company_name, "Testgården");
+        let mut with_org = base.to_vec();
+        with_org.extend(["--org-number", "999999-0006"]);
+        assert_eq!(
+            parse_export_options(&args(&with_org))
+                .expect("org")
+                .org_number
+                .as_deref(),
+            Some("999999-0006")
+        );
+        let mut bad_date = base.to_vec();
+        bad_date[9] = "20260910";
+        assert!(parse_export_options(&args(&bad_date))
+            .expect_err("date")
+            .contains("YYYY-MM-DD"));
+        let missing: Vec<&str> = base[..10].to_vec();
+        assert!(parse_export_options(&args(&missing))
+            .expect_err("missing")
+            .contains("--company-name"));
+        let mut dup = base.to_vec();
+        dup.extend(["--org-number", "1", "--org-number", "2"]);
+        assert!(parse_export_options(&args(&dup))
+            .expect_err("dup")
+            .contains("more than once"));
+        let mut unknown = base.to_vec();
+        unknown.push("--force");
+        assert!(parse_export_options(&args(&unknown))
+            .expect_err("unknown")
+            .contains("unknown option"));
     }
 }
