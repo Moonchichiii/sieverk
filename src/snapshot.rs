@@ -8,11 +8,17 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use serde::Deserialize;
+use chrono::NaiveDate;
+use serde::{Deserialize, Deserializer};
 
 use crate::money::Ore;
 
-const SUPPORTED_SCHEMAS: [&str; 2] = ["1.0", "1.1"];
+const SUPPORTED_SCHEMAS: [&str; 3] = ["1.0", "1.1", "1.2"];
+
+/// Schema 1.2 (SK-SIE-BRIDGE-03): accounting identity + fiscal period.
+const SCHEMA_ACCOUNTING_IDENTITY: &str = "1.2";
+/// L-PERIOD (BRIDGE-01 §2.1, identical to Django): at most 18 calendar months.
+const MAX_PERIOD_MONTHS: u32 = 18;
 
 // ---------------------------------------------------------------------------
 // Public, typed model
@@ -24,6 +30,8 @@ pub struct Snapshot {
     pub generated_at: String,
     pub source: Source,
     pub entity: Entity,
+    /// Schema 1.2 only; `None` for 1.0/1.1 and for 1.2 with `null`.
+    pub fiscal_period: Option<FiscalPeriod>,
     pub income_year: u16,
     pub lock: Lock,
     pub properties: Vec<Property>,
@@ -49,6 +57,99 @@ pub struct Entity {
     pub taxonomy_version: Option<String>,
     /// Schema 1.1 only.
     pub accounting_profile: Option<AccountingProfile>,
+    /// Schema 1.2 only; `None` for 1.0/1.1 and for 1.2 with `null`.
+    pub accounting_identity: Option<AccountingIdentity>,
+}
+
+/// Legal form of the accounting entity (Contract 1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityType {
+    SoleTrader,
+    LimitedCompany,
+    TradingPartnership,
+    LimitedPartnership,
+    OtherLegalPerson,
+}
+
+impl EntityType {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "sole_trader" => Self::SoleTrader,
+            "limited_company" => Self::LimitedCompany,
+            "trading_partnership" => Self::TradingPartnership,
+            "limited_partnership" => Self::LimitedPartnership,
+            "other_legal_person" => Self::OtherLegalPerson,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SoleTrader => "sole_trader",
+            Self::LimitedCompany => "limited_company",
+            Self::TradingPartnership => "trading_partnership",
+            Self::LimitedPartnership => "limited_partnership",
+            Self::OtherLegalPerson => "other_legal_person",
+        }
+    }
+}
+
+/// Kind of business identifier. F/FA tax status is never an input here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierKind {
+    PersonalNumber,
+    CoordinationNumber,
+    OrganisationNumber,
+}
+
+impl IdentifierKind {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "personal_number" => Self::PersonalNumber,
+            "coordination_number" => Self::CoordinationNumber,
+            "organisation_number" => Self::OrganisationNumber,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PersonalNumber => "personal_number",
+            Self::CoordinationNumber => "coordination_number",
+            Self::OrganisationNumber => "organisation_number",
+        }
+    }
+}
+
+/// The accounting identity exactly as sent by Django (schema 1.2). The values
+/// are retained unchanged for the authorised export; `Debug` never prints the
+/// legal name or the identifier.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountingIdentity {
+    pub entity_type: EntityType,
+    pub legal_name: String,
+    pub identifier_kind: IdentifierKind,
+    /// Wire form `NNNNNN-NNNN`, validated (L-WIRE-VALID), never transformed.
+    pub business_identifier: String,
+}
+
+impl fmt::Debug for AccountingIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AccountingIdentity")
+            .field("entity_type", &self.entity_type)
+            .field("identifier_kind", &self.identifier_kind)
+            .field("legal_name", &format_args!("[REDACTED]"))
+            .field("business_identifier", &format_args!("[REDACTED]"))
+            .finish()
+    }
+}
+
+/// The fiscal period exactly as sent (schema 1.2); never derived from
+/// `income_year`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FiscalPeriod {
+    pub start: NaiveDate,
+    pub end: NaiveDate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -195,12 +296,25 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
 // Raw DTO — exactly the wire shape, money as text
 // ---------------------------------------------------------------------------
 
+/// Presence-aware field: absent key -> `None` (via `#[serde(default)]`),
+/// `null` -> `Some(None)`, value -> `Some(Some(v))`. Decided inside the single
+/// typed serde pass — no second JSON parse, no global `deny_unknown_fields`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 struct RawSnapshot {
     schema_version: String,
     generated_at: String,
     source: Source,
     entity: RawEntity,
+    #[serde(default, deserialize_with = "present")]
+    fiscal_period: Option<Option<RawFiscalPeriod>>,
     income_year: u16,
     lock: Lock,
     properties: Vec<Property>,
@@ -213,8 +327,8 @@ struct RawSnapshot {
 struct RawEntity {
     owner_id: i64,
     display_name: String,
-    #[serde(default)]
-    org_number: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    org_number: Option<Option<String>>,
     operation: Vec<String>,
     #[serde(default)]
     county: Option<String>,
@@ -222,6 +336,24 @@ struct RawEntity {
     taxonomy_version: Option<String>,
     #[serde(default)]
     accounting_profile: Option<AccountingProfile>,
+    #[serde(default, deserialize_with = "present")]
+    accounting_identity: Option<Option<RawAccountingIdentity>>,
+}
+
+/// Raw identity: every field is text so an unknown value is our own error with
+/// a JSON path and a fixed message, never a serde message echoing the value.
+#[derive(Deserialize)]
+struct RawAccountingIdentity {
+    entity_type: serde_json::Value,
+    legal_name: serde_json::Value,
+    identifier_kind: serde_json::Value,
+    business_identifier: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct RawFiscalPeriod {
+    start: serde_json::Value,
+    end: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -338,6 +470,13 @@ fn convert(raw: RawSnapshot) -> Result<Snapshot, SnapshotError> {
         ));
     }
 
+    let (org_number, accounting_identity, fiscal_period) = identity_and_period(
+        &raw.schema_version,
+        raw.entity.org_number,
+        raw.entity.accounting_identity,
+        raw.fiscal_period,
+    )?;
+
     let known_properties: HashSet<i64> = raw.properties.iter().map(|p| p.id).collect();
 
     let mut receipts = Vec::with_capacity(raw.receipts.len());
@@ -431,12 +570,14 @@ fn convert(raw: RawSnapshot) -> Result<Snapshot, SnapshotError> {
         entity: Entity {
             owner_id: raw.entity.owner_id,
             display_name: raw.entity.display_name,
-            org_number: raw.entity.org_number,
+            org_number,
             operation: raw.entity.operation,
             county: raw.entity.county,
             taxonomy_version: raw.entity.taxonomy_version,
             accounting_profile: raw.entity.accounting_profile,
+            accounting_identity,
         },
+        fiscal_period,
         income_year: raw.income_year,
         lock: raw.lock,
         properties: raw.properties,
@@ -444,6 +585,200 @@ fn convert(raw: RawSnapshot) -> Result<Snapshot, SnapshotError> {
         income_entries,
         audit_chain: raw.audit_chain,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Schema 1.2 — accounting identity and fiscal period (SK-SIE-BRIDGE-03)
+// ---------------------------------------------------------------------------
+
+type IdentityParts = (
+    Option<String>,
+    Option<AccountingIdentity>,
+    Option<FiscalPeriod>,
+);
+
+/// L-KEYS: version-specific key presence. 1.0/1.1 keep `org_number` as before
+/// and must not carry the two new keys; 1.2 must carry both (value may be
+/// `null`) and must not carry `org_number` at all, not even as `null`.
+fn identity_and_period(
+    schema: &str,
+    org_number: Option<Option<String>>,
+    identity: Option<Option<RawAccountingIdentity>>,
+    period: Option<Option<RawFiscalPeriod>>,
+) -> Result<IdentityParts, SnapshotError> {
+    if schema != SCHEMA_ACCOUNTING_IDENTITY {
+        if identity.is_some() {
+            return Err(err(
+                "entity.accounting_identity",
+                "only allowed in schema 1.2",
+            ));
+        }
+        if period.is_some() {
+            return Err(err("fiscal_period", "only allowed in schema 1.2"));
+        }
+        return Ok((org_number.flatten(), None, None));
+    }
+    if org_number.is_some() {
+        return Err(err(
+            "entity.org_number",
+            "not allowed in schema 1.2 (the accounting identity is entity.accounting_identity)",
+        ));
+    }
+    let identity = match identity {
+        None => {
+            return Err(err(
+                "entity.accounting_identity",
+                "required key in schema 1.2",
+            ))
+        }
+        Some(None) => None,
+        Some(Some(raw)) => Some(convert_identity(raw)?),
+    };
+    let period = match period {
+        None => return Err(err("fiscal_period", "required key in schema 1.2")),
+        Some(None) => None,
+        Some(Some(raw)) => Some(convert_period(raw)?),
+    };
+    Ok((None, identity, period))
+}
+
+fn text_field(value: serde_json::Value, path: &str) -> Result<String, SnapshotError> {
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        _ => Err(err(path, "must be a string")),
+    }
+}
+
+fn convert_identity(raw: RawAccountingIdentity) -> Result<AccountingIdentity, SnapshotError> {
+    const AT: &str = "entity.accounting_identity";
+    let entity_type =
+        EntityType::parse(&text_field(raw.entity_type, &format!("{AT}.entity_type"))?)
+            .ok_or_else(|| err(format!("{AT}.entity_type"), "unknown entity type"))?;
+    let identifier_kind = IdentifierKind::parse(&text_field(
+        raw.identifier_kind,
+        &format!("{AT}.identifier_kind"),
+    )?)
+    .ok_or_else(|| err(format!("{AT}.identifier_kind"), "unknown identifier kind"))?;
+    let pair_ok = match entity_type {
+        EntityType::SoleTrader => matches!(
+            identifier_kind,
+            IdentifierKind::PersonalNumber | IdentifierKind::CoordinationNumber
+        ),
+        _ => identifier_kind == IdentifierKind::OrganisationNumber,
+    };
+    if !pair_ok {
+        return Err(err(
+            format!("{AT}.identifier_kind"),
+            "identifier kind does not match the entity type",
+        ));
+    }
+    let legal_name = text_field(raw.legal_name, &format!("{AT}.legal_name"))?;
+    if legal_name.trim().is_empty() {
+        return Err(err(format!("{AT}.legal_name"), "must not be empty"));
+    }
+    if legal_name
+        .chars()
+        .any(|c| (c as u32) < 0x20 || c as u32 == 0x7F)
+    {
+        return Err(err(
+            format!("{AT}.legal_name"),
+            "must not contain control characters",
+        ));
+    }
+    let business_identifier = text_field(
+        raw.business_identifier,
+        &format!("{AT}.business_identifier"),
+    )?;
+    if !wire_identifier_valid(&business_identifier, identifier_kind) {
+        // Fixed text: the value is never echoed.
+        return Err(err(
+            format!("{AT}.business_identifier"),
+            "not a valid identifier for its kind (expected NNNNNN-NNNN)",
+        ));
+    }
+    Ok(AccountingIdentity {
+        entity_type,
+        legal_name,
+        identifier_kind,
+        business_identifier,
+    })
+}
+
+/// L-WIRE-VALID: exact 11-byte ASCII `DDDDDD-DDDD`, Luhn over the ten digits,
+/// plus the kind rule. No trimming, no normalisation, no invented century.
+pub(crate) fn wire_identifier_valid(value: &str, kind: IdentifierKind) -> bool {
+    let b = value.as_bytes();
+    if b.len() != 11 || b[6] != b'-' {
+        return false;
+    }
+    let digits: Vec<u8> = b[..6].iter().chain(&b[7..]).copied().collect();
+    if digits.len() != 10 || !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let d: Vec<u32> = digits.iter().map(|c| u32::from(c - b'0')).collect();
+    let luhn: u32 = d
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = if i % 2 == 0 { v * 2 } else { *v };
+            if x > 9 {
+                x - 9
+            } else {
+                x
+            }
+        })
+        .sum();
+    if !luhn.is_multiple_of(10) {
+        return false;
+    }
+    let month = d[2] * 10 + d[3];
+    let day = d[4] * 10 + d[5];
+    match kind {
+        IdentifierKind::PersonalNumber => (1..=12).contains(&month) && (1..=31).contains(&day),
+        IdentifierKind::CoordinationNumber => (1..=12).contains(&month) && (61..=91).contains(&day),
+        IdentifierKind::OrganisationNumber => d[2] >= 2,
+    }
+}
+
+fn strict_date(value: serde_json::Value, path: &str) -> Result<NaiveDate, SnapshotError> {
+    let text = text_field(value, path)?;
+    let b = text.as_bytes();
+    let shape_ok = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+    if !shape_ok {
+        return Err(err(path, "expected YYYY-MM-DD"));
+    }
+    NaiveDate::parse_from_str(&text, "%Y-%m-%d").map_err(|_| err(path, "not a calendar date"))
+}
+
+/// Same day-of-month `months` calendar months later, clamped to the last day of
+/// the target month — the algorithm Django uses (BRIDGE-01 §2.1).
+fn add_months(day: NaiveDate, months: u32) -> Option<NaiveDate> {
+    use chrono::Datelike;
+    let index = day.month0() + months;
+    let year = day.year() + i32::try_from(index / 12).ok()?;
+    let month = index % 12 + 1;
+    (1..=day.day())
+        .rev()
+        .find_map(|d| NaiveDate::from_ymd_opt(year, month, d))
+}
+
+fn convert_period(raw: RawFiscalPeriod) -> Result<FiscalPeriod, SnapshotError> {
+    let start = strict_date(raw.start, "fiscal_period.start")?;
+    let end = strict_date(raw.end, "fiscal_period.end")?;
+    if start > end {
+        return Err(err("fiscal_period", "start is after end"));
+    }
+    let limit = add_months(start, MAX_PERIOD_MONTHS)
+        .ok_or_else(|| err("fiscal_period", "period length overflow"))?;
+    if end >= limit {
+        return Err(err("fiscal_period", "longer than 18 calendar months"));
+    }
+    Ok(FiscalPeriod { start, end })
 }
 
 // ---------------------------------------------------------------------------

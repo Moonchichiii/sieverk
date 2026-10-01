@@ -117,6 +117,40 @@ pub enum IngestOutcome {
     },
 }
 
+/// What one `ingest_snapshot` call computed from one byte string: the outcome,
+/// the digest and the typed snapshot. Fields are private and the type is only
+/// constructed by `Workspace`, so a digest can never be paired with a snapshot
+/// it was not computed from (SK-SIE-BRIDGE-03 provenance binding). `Debug`
+/// shows the outcome and digest only — never the snapshot.
+pub struct IngestedSnapshot {
+    outcome: IngestOutcome,
+    snapshot_sha256: String,
+    snapshot: Snapshot,
+}
+
+impl IngestedSnapshot {
+    pub fn outcome(&self) -> &IngestOutcome {
+        &self.outcome
+    }
+
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub fn snapshot_sha256(&self) -> &str {
+        &self.snapshot_sha256
+    }
+}
+
+impl fmt::Debug for IngestedSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IngestedSnapshot")
+            .field("outcome", &self.outcome)
+            .field("snapshot_sha256", &self.snapshot_sha256)
+            .finish_non_exhaustive()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Readback rows — what SV-03/SV-04 consume. Read from DuckDB only; the
 // snapshot JSON is never opened again after ingest.
@@ -797,6 +831,35 @@ impl Workspace {
     /// per table, explicit `flush()`, commit only after every appender
     /// succeeded; any append or flush error rolls everything back.
     pub fn ingest(&mut self, raw_json: &[u8]) -> Result<IngestOutcome, WorkspaceError> {
+        self.ingest_inner(raw_json, false)
+            .map(|(outcome, _, _)| outcome)
+    }
+
+    /// `ingest`, keeping what this call computed (SK-SIE-BRIDGE-03): the digest
+    /// and the typed snapshot of exactly these bytes, in an envelope only
+    /// `Workspace` can create. A fresh ingest hands over the typed value it
+    /// already parsed (no extra parse, no extra file read); the already-ingested
+    /// branch parses once, because it has to return a typed value.
+    pub fn ingest_snapshot(&mut self, raw_json: &[u8]) -> Result<IngestedSnapshot, WorkspaceError> {
+        let (outcome, digest, snapshot) = self.ingest_inner(raw_json, true)?;
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => {
+                parse_snapshot(raw_json).map_err(|e| WorkspaceError::Snapshot(e.to_string()))?
+            }
+        };
+        Ok(IngestedSnapshot {
+            outcome,
+            snapshot_sha256: digest,
+            snapshot,
+        })
+    }
+
+    fn ingest_inner(
+        &mut self,
+        raw_json: &[u8],
+        keep_typed: bool,
+    ) -> Result<(IngestOutcome, String, Option<Snapshot>), WorkspaceError> {
         // Schema gate before anything else: schema 1 → normal ingest;
         // schema 2 | schema 3 → run containers, digest comparison only, never
         // a write; any other schema → refused before parse, Appender or
@@ -813,9 +876,13 @@ impl Workspace {
                         let digest = self.snapshot_digest(raw_json)?;
                         let existing = self.snapshot_sha256()?;
                         if existing == digest {
-                            Ok(IngestOutcome::AlreadyIngested {
-                                snapshot_sha256: digest,
-                            })
+                            Ok((
+                                IngestOutcome::AlreadyIngested {
+                                    snapshot_sha256: digest.clone(),
+                                },
+                                digest,
+                                None,
+                            ))
                         } else {
                             Err(WorkspaceError::SnapshotMismatch {
                                 existing,
@@ -841,9 +908,13 @@ impl Workspace {
             1 => {
                 let existing = self.snapshot_sha256()?;
                 if existing == digest {
-                    return Ok(IngestOutcome::AlreadyIngested {
-                        snapshot_sha256: digest,
-                    });
+                    return Ok((
+                        IngestOutcome::AlreadyIngested {
+                            snapshot_sha256: digest.clone(),
+                        },
+                        digest,
+                        None,
+                    ));
                 }
                 return Err(WorkspaceError::SnapshotMismatch {
                     existing,
@@ -871,13 +942,14 @@ impl Workspace {
             }
         };
         tx.commit()?;
-        Ok(IngestOutcome::Ingested {
-            snapshot_sha256: digest,
+        let outcome = IngestOutcome::Ingested {
+            snapshot_sha256: digest.clone(),
             properties: counts.0,
             receipts: counts.1,
             income_entries: counts.2,
             audit_items: counts.3,
-        })
+        };
+        Ok((outcome, digest, keep_typed.then_some(snapshot)))
     }
 
     /// Every read below requires exactly one ingested snapshot.
