@@ -16,7 +16,7 @@ serde_json = "1"
 
 # SV-02D: file-backed derived accounting workspace. bundled keeps Windows/Ubuntu
 # self-contained; chrono is the locked NaiveDate <-> DuckDB DATE bridge.
-duckdb = { version = "=1.10505.0", features = ["bundled", "chrono"] }
+duckdb = { version = "=1.10506.0", features = ["bundled", "chrono"] }
 chrono = "=0.4.45"
 
 # Money is i64 öre (src/money.rs) BY DESIGN, not a shortcut: SIE amounts
