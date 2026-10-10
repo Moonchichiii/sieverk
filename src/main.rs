@@ -9,6 +9,7 @@ use chrono::NaiveDate;
 use sieverk::accounts::{parse_accounts, AccountData};
 use sieverk::decode_sie_bytes;
 use sieverk::engine::run_engine;
+use sieverk::export_context::VerifiedExportContext;
 use sieverk::metadata::{parse_metadata, Metadata};
 use sieverk::money::Ore;
 use sieverk::ruleset::load_masterdata;
@@ -445,10 +446,11 @@ fn inspect_workspace(workspace: &Path) -> Result<String, String> {
 
 const EXPORT_USAGE: &str =
     "usage: sieverk export-sie --snapshot <snapshot.json> --root <generated-dir> \
---workspace <new.duckdb> --out <file.SI> --generated-on YYYY-MM-DD --company-name <text> \
-[--org-number NNNNNN-NNNN]";
+--workspace <new.duckdb> --out <file.SI> --generated-on YYYY-MM-DD";
 
-/// The complete, explicit input of one `export-sie` run (SV-04 Slice 1).
+/// The complete, explicit input of one `export-sie` run. Identity is not an
+/// input any more (SK-SIE-BRIDGE-04): `#FNAMN`, `#ORGNR` and `#RAR 0` come only
+/// from the snapshot's verified accounting identity and fiscal period.
 #[derive(Debug)]
 struct ExportOptions {
     snapshot: PathBuf,
@@ -456,79 +458,54 @@ struct ExportOptions {
     workspace: PathBuf,
     out: PathBuf,
     generated_on: NaiveDate,
-    company_name: String,
-    org_number: Option<String>,
 }
 
-/// `--org-number` is the one optional option; everything else goes through
-/// the strict `parse_options` (each exactly once, nothing unknown).
+/// Strict: each option exactly once, nothing unknown (so `--company-name` and
+/// `--org-number` are refused as unknown options).
 fn parse_export_options(args: &[String]) -> Result<ExportOptions, String> {
-    let mut rest: Vec<String> = Vec::with_capacity(args.len());
-    let mut org_number: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--org-number" {
-            if org_number.is_some() {
-                return Err("--org-number given more than once".to_string());
-            }
-            match args.get(i + 1) {
-                Some(v) if !v.starts_with("--") => org_number = Some(v.clone()),
-                _ => return Err("--org-number requires a value".to_string()),
-            }
-            i += 2;
-        } else {
-            rest.push(args[i].clone());
-            i += 1;
-        }
-    }
     let opts = parse_options(
-        &rest,
+        args,
         &[
             "--snapshot",
             "--root",
             "--workspace",
             "--out",
             "--generated-on",
-            "--company-name",
         ],
     )?;
     let generated_on = NaiveDate::parse_from_str(&opts[4], "%Y-%m-%d")
         .map_err(|_| format!("--generated-on {:?} is not YYYY-MM-DD", opts[4]))?;
-    if opts[5].trim().is_empty() {
-        return Err("--company-name must not be empty".to_string());
-    }
     Ok(ExportOptions {
         snapshot: PathBuf::from(&opts[0]),
         root: PathBuf::from(&opts[1]),
         workspace: PathBuf::from(&opts[2]),
         out: PathBuf::from(&opts[3]),
         generated_on,
-        company_name: opts[5].clone(),
-        org_number,
     })
 }
 
-/// `export-sie`: the canonical generation path — snapshot → new workspace →
-/// ingest → masterdata → SV-03 engine (schema 3) → verified run → SV-04
-/// writer → bytes on disk. The output path must not exist. Evidence only on
-/// stdout; no rows, no names beyond what the caller supplied.
+/// `export-sie`: the canonical generation path — snapshot read once → new
+/// workspace → ingest_snapshot → masterdata → engine (schema 3) →
+/// VerifiedExportContext::bind → writer → bytes on disk (`create_new`).
+/// stdout carries evidence only: never the identifier or the legal name.
 fn export_sie(opts: &ExportOptions) -> Result<String, String> {
     let raw = fs::read(&opts.snapshot)
         .map_err(|e| format!("could not read {}: {e}", opts.snapshot.display()))?;
     let masterdata = load_masterdata(&opts.root).map_err(|e| e.to_string())?;
     let mut ws = Workspace::create(&opts.workspace).map_err(|e| e.to_string())?;
-    ws.ingest(&raw).map_err(|e| format!("ingest failed: {e}"))?;
+    let ingested = ws
+        .ingest_snapshot(&raw)
+        .map_err(|e| format!("ingest failed: {e}"))?;
     let evidence = run_engine(&mut ws, &masterdata).map_err(|e| e.to_string())?;
+    let context = VerifiedExportContext::bind(&ingested, &ws).map_err(|e| e.to_string())?;
     let meta = ExportMetadata {
-        company_name: opts.company_name.clone(),
-        org_number: opts.org_number.clone(),
         generated_on: opts.generated_on,
         program: ProgramId {
             name: "SIEverk".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
     };
-    let export = write_sie4i(&ws, &masterdata, &meta).map_err(|e| e.to_string())?;
+    let export = write_sie4i(&ws, &masterdata, &context, &meta).map_err(|e| e.to_string())?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -537,12 +514,17 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
     file.write_all(&export.bytes)
         .map_err(|e| format!("could not write {}: {e}", opts.out.display()))?;
     ws.close().map_err(|e| e.to_string())?;
+    let period = context.fiscal_period();
     Ok(format!(
-        "workspace={}\nsnapshot_sha256={}\ndecision_sha256={}\nvouchers={}\naccounts={}\n\
-         bytes={}\nsi_sha256={}\nout={}\n",
+        "workspace={}\nsnapshot_sha256={}\ndecision_sha256={}\nentity_type={}\nidentifier_kind={}\n\
+         fiscal_period={}..{}\nvouchers={}\naccounts={}\nbytes={}\nsi_sha256={}\nout={}\n",
         opts.workspace.display(),
         evidence.run.provenance.snapshot_sha256,
         evidence.run.decision_sha256,
+        context.entity_type().as_str(),
+        context.identifier_kind().as_str(),
+        period.start,
+        period.end,
         export.vouchers,
         export.accounts,
         export.bytes.len(),
@@ -935,45 +917,53 @@ mod tests {
         assert!(e.contains("missing required option --workspace"), "{e}");
     }
 
-    // -- SV-04 Slice 1: export-sie ---------------------------------------------
+    // -- SV-04 Slice 1 + SK-SIE-BRIDGE-04: export-sie -----------------------------
 
     const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
-    const TESTGARDEN_SI_SHA256: &str =
-        "3fc89f8b504f883d0a4444e11e5389c25b99f201b0bfdaf88a65c74a23e20660";
+    const TESTGARDEN_12: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
+    /// vNext canonical Testgården (BRIDGE-04): 487 bytes.
+    const TESTGARDEN_VNEXT_SHA256: &str =
+        "b977601f45b5a5495dead24849393f19626fa17d0d9c6b7f50d64d33e418dd0b";
 
-    fn export_opts(name: &str) -> (TempDb, TempDb, ExportOptions) {
+    fn export_opts(name: &str, snapshot: &str) -> (TempDb, TempDb, ExportOptions) {
         let db = TempDb::new(name);
         let out = TempDb::new(&format!("{name}-out"));
         let out_path = out.path().with_extension("SI");
         let _ = std::fs::remove_file(&out_path);
         let opts = ExportOptions {
-            snapshot: PathBuf::from(TESTGARDEN),
+            snapshot: PathBuf::from(snapshot),
             root: PathBuf::from(SYNTHETIC_ROOT),
             workspace: db.path().to_path_buf(),
             out: out_path,
             generated_on: NaiveDate::from_ymd_opt(2026, 9, 10).expect("date"),
-            company_name: "Testgården".to_string(),
-            org_number: None,
         };
         (db, out, opts)
     }
 
     #[test]
-    fn cli_export_sie_generates_the_locked_testgarden_file() {
-        let (_db, _out, opts) = export_opts("export");
+    fn cli_export_sie_generates_the_vnext_testgarden_file() {
+        let (_db, _out, opts) = export_opts("export", TESTGARDEN_12);
         let text = export_sie(&opts).expect("export");
         let bytes = std::fs::read(&opts.out).expect("out file");
-        assert_eq!(bytes.len(), 441, "{text}");
+        assert_eq!(bytes.len(), 487, "{text}");
         assert!(
-            text.contains(&format!("si_sha256={TESTGARDEN_SI_SHA256}\n")),
+            text.contains(&format!("si_sha256={TESTGARDEN_VNEXT_SHA256}\n")),
             "{text}"
         );
         assert!(
             text.contains("vouchers=2\n") && text.contains("accounts=4\n"),
             "{text}"
         );
-        assert!(text.contains("bytes=441\n"), "{text}");
-        assert!(!text.contains("999999-0006") && !text.contains("Röjarlaget"));
+        assert!(text.contains("entity_type=sole_trader\n"), "{text}");
+        assert!(text.contains("identifier_kind=personal_number\n"), "{text}");
+        assert!(
+            text.contains("fiscal_period=2026-01-01..2026-12-31\n"),
+            "{text}"
+        );
+        // Evidence never carries the identifier or the legal name.
+        for secret in ["900101-9802", "9001019802", "Testgården"] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
         // Existing output path is refused; the workspace already exists too.
         let e = export_sie(&opts).expect_err("second run must refuse");
         assert!(
@@ -981,6 +971,14 @@ mod tests {
             "{e}"
         );
         let _ = std::fs::remove_file(&opts.out);
+    }
+
+    #[test]
+    fn cli_export_sie_refuses_a_snapshot_without_accounting_identity() {
+        let (_db, _out, opts) = export_opts("export-11", TESTGARDEN);
+        let e = export_sie(&opts).expect_err("1.1 has no accounting identity");
+        assert!(e.contains("no accounting identity"), "{e}");
+        assert!(!opts.out.exists(), "no file is written on error");
     }
 
     #[test]
@@ -996,35 +994,27 @@ mod tests {
             "o.SI",
             "--generated-on",
             "2026-09-10",
-            "--company-name",
-            "Testgården",
         ];
         let ok = parse_export_options(&args(&base)).expect("complete");
-        assert_eq!(ok.org_number, None);
-        assert_eq!(ok.company_name, "Testgården");
-        let mut with_org = base.to_vec();
-        with_org.extend(["--org-number", "999999-0006"]);
-        assert_eq!(
-            parse_export_options(&args(&with_org))
-                .expect("org")
-                .org_number
-                .as_deref(),
-            Some("999999-0006")
-        );
+        assert_eq!(ok.out, PathBuf::from("o.SI"));
+        for removed in [
+            ["--company-name", "Testgården"],
+            ["--org-number", "999999-0006"],
+        ] {
+            let mut with = base.to_vec();
+            with.extend(removed);
+            let e = parse_export_options(&args(&with)).expect_err("identity options are gone");
+            assert!(e.contains("unknown option"), "{e}");
+        }
         let mut bad_date = base.to_vec();
         bad_date[9] = "20260910";
         assert!(parse_export_options(&args(&bad_date))
             .expect_err("date")
             .contains("YYYY-MM-DD"));
-        let missing: Vec<&str> = base[..10].to_vec();
+        let missing: Vec<&str> = base[..8].to_vec();
         assert!(parse_export_options(&args(&missing))
             .expect_err("missing")
-            .contains("--company-name"));
-        let mut dup = base.to_vec();
-        dup.extend(["--org-number", "1", "--org-number", "2"]);
-        assert!(parse_export_options(&args(&dup))
-            .expect_err("dup")
-            .contains("more than once"));
+            .contains("--generated-on"));
         let mut unknown = base.to_vec();
         unknown.push("--force");
         assert!(parse_export_options(&args(&unknown))

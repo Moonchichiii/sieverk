@@ -482,22 +482,34 @@ fn engine_semantics_are_unchanged_between_1_1_and_1_2() {
 }
 
 #[test]
-fn historical_441_byte_file_through_the_unchanged_cli_identity_path() {
+fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
+    // SK-SIE-BRIDGE-04: the writer now takes identity only from the context.
+    // Removing exactly #ORGNR and #RAR 0 from the vNext file must give the
+    // historical Slice-1 bytes — the accounting content is unchanged.
     let md = masterdata();
     let db = TempDb::new("writer-regression");
-    let (ws, _) = engine_run(&db, &read(V12), &md);
+    let (ws, ingested) = engine_run(&db, &read(V12), &md);
+    let ctx = VerifiedExportContext::bind(&ingested, &ws).expect("bind");
     let meta = ExportMetadata {
-        company_name: "Testgården".to_string(),
-        org_number: None,
         generated_on: NaiveDate::from_ymd_opt(2026, 9, 10).expect("date"),
         program: ProgramId {
             name: "SIEverk".to_string(),
             version: "0.4.0".to_string(),
         },
     };
-    let out = write_sie4i(&ws, &md, &meta).expect("export");
-    assert_eq!(out.bytes.len(), 441);
-    assert_eq!(out.sha256, HISTORICAL_SI_SHA256);
+    let out = write_sie4i(&ws, &md, &ctx, &meta).expect("export");
+    assert_eq!(out.bytes.len(), 487);
+    let mut bytes = out.bytes.clone();
+    for line in ["#ORGNR 900101-9802\r\n", "#RAR 0 20260101 20261231\r\n"] {
+        let needle = line.as_bytes();
+        let at = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("line present once");
+        bytes.drain(at..at + needle.len());
+    }
+    assert_eq!(bytes.len(), 441);
+    assert_eq!(ws.sha256_hex(&bytes).expect("sha"), HISTORICAL_SI_SHA256);
 }
 
 // ---------------------------------------------------------------------------

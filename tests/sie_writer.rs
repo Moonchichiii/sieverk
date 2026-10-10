@@ -1,13 +1,16 @@
-//! sie_writer (SV-04 Slice 1) — real Testgården workspace file, real
-//! synthetic masterdata, real SV-03 engine run, real SIE 4I bytes. No mocks.
-//! The golden expectation is the locked 441-byte reference
-//! (sha256 3fc89f8b…0660) generated under the Slice-1 lock decisions.
+//! sie_writer (SV-04 Slice 1 + SK-SIE-BRIDGE-04) — real Testgården snapshot
+//! 1.2, real DuckDB workspace, real synthetic masterdata, real SV-03 engine
+//! run, real `VerifiedExportContext`, real SIE 4I bytes. No mocks.
+//! The golden is the vNext canonical file (487 bytes, sha256 b977601f…dd0b):
+//! the historical 441-byte Slice-1 file (3fc89f8b…0660) plus `#ORGNR` and
+//! `#RAR 0` in the Capego RUN-02 order. The historical file stays evidence.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use sieverk::engine::run_engine;
+use sieverk::export_context::VerifiedExportContext;
 use sieverk::money::Ore;
 use sieverk::ruleset::{load_masterdata, Masterdata};
 use sieverk::sie_writer::{write_sie4i, ExportMetadata, ProgramId, SieExport, SieWriteError};
@@ -15,13 +18,18 @@ use sieverk::validator::{validate, Code, Severity};
 use sieverk::workspace::{Workspace, WorkspaceError, WORKSPACE_SCHEMA_DECISIONS};
 use sieverk::{accounts, decode_sie_bytes, metadata, vouchers};
 
-const TESTGARDEN: &str = "fixtures/snapshots/testgarden-2026-1.1.json";
+const TESTGARDEN: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
 const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
-const REFERENCE_SHA256: &str = "3fc89f8b504f883d0a4444e11e5389c25b99f201b0bfdaf88a65c74a23e20660";
-const REFERENCE_BYTES: usize = 441;
+const HISTORICAL_SHA256: &str = "3fc89f8b504f883d0a4444e11e5389c25b99f201b0bfdaf88a65c74a23e20660";
+const HISTORICAL_BYTES: usize = 441;
+const VNEXT_SHA256: &str = "b977601f45b5a5495dead24849393f19626fa17d0d9c6b7f50d64d33e418dd0b";
+const VNEXT_BYTES: usize = 487;
+const ORGNR_LINE: &str = "#ORGNR 900101-9802\r\n";
+const RAR_LINE: &str = "#RAR 0 20260101 20261231\r\n";
 
 /// The locked reference text (CRLF, CP437) — decoded form for text comparison.
-const REFERENCE_TEXT: &str = "#FLAGGA 0\r\n\
+/// The historical Slice-1 file (evidence; never regenerated).
+const HISTORICAL_TEXT: &str = "#FLAGGA 0\r\n\
 #PROGRAM \"SIEverk\" \"0.4.0\"\r\n\
 #FORMAT PC8\r\n\
 #GEN 20260910\r\n\
@@ -75,19 +83,39 @@ fn masterdata() -> Masterdata {
     load_masterdata(&repo(SYNTHETIC_ROOT)).expect("synthetic masterdata")
 }
 
-/// The canonical path: snapshot → create → ingest → run_engine (schema 3).
-fn run_workspace(db: &TempDb, md: &Masterdata) -> Workspace {
-    let raw = fs::read(repo(TESTGARDEN)).expect("fixture");
+/// The vNext canonical text: the historical file with `#ORGNR` before `#FNAMN`
+/// and `#RAR 0` after it (DDR-ORDER, Capego RUN-02).
+fn vnext_text() -> String {
+    HISTORICAL_TEXT
+        .replacen("#FNAMN", &format!("{ORGNR_LINE}#FNAMN"), 1)
+        .replacen("#KONTO 1930", &format!("{RAR_LINE}#KONTO 1930"), 1)
+}
+
+fn snapshot_json() -> serde_json::Value {
+    serde_json::from_slice(&fs::read(repo(TESTGARDEN)).expect("fixture")).expect("json")
+}
+
+fn snapshot_with(f: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let mut v = snapshot_json();
+    f(&mut v);
+    serde_json::to_vec(&v).expect("serialise")
+}
+
+/// The canonical path: snapshot -> create -> ingest_snapshot -> run_engine -> bind.
+fn run_raw(db: &TempDb, raw: &[u8], md: &Masterdata) -> (Workspace, VerifiedExportContext) {
     let mut ws = Workspace::create(db.path()).expect("create");
-    ws.ingest(&raw).expect("ingest");
+    let ingested = ws.ingest_snapshot(raw).expect("ingest_snapshot");
     run_engine(&mut ws, md).expect("run_engine");
-    ws
+    let ctx = VerifiedExportContext::bind(&ingested, &ws).expect("bind");
+    (ws, ctx)
+}
+
+fn run_workspace(db: &TempDb, md: &Masterdata) -> (Workspace, VerifiedExportContext) {
+    run_raw(db, &fs::read(repo(TESTGARDEN)).expect("fixture"), md)
 }
 
 fn meta() -> ExportMetadata {
     ExportMetadata {
-        company_name: "Testgården".to_string(),
-        org_number: None,
         generated_on: NaiveDate::from_ymd_opt(2026, 9, 10).expect("date"),
         program: ProgramId {
             name: "SIEverk".to_string(),
@@ -96,8 +124,8 @@ fn meta() -> ExportMetadata {
     }
 }
 
-fn export(ws: &Workspace, md: &Masterdata) -> SieExport {
-    write_sie4i(ws, md, &meta()).expect("export")
+fn export(ws: &Workspace, md: &Masterdata, ctx: &VerifiedExportContext) -> SieExport {
+    write_sie4i(ws, md, ctx, &meta()).expect("export")
 }
 
 fn sql(ws: &Workspace, statement: &str) {
@@ -106,49 +134,81 @@ fn sql(ws: &Workspace, statement: &str) {
 
 // W1 — exact golden bytes, CRLF everywhere, evidence counts
 #[test]
-fn w1_testgarden_export_matches_the_locked_reference_exactly() {
+fn w1_testgarden_export_matches_the_vnext_canonical_exactly() {
     let db = TempDb::new("w1");
     let md = masterdata();
-    let ws = run_workspace(&db, &md);
-    let out = export(&ws, &md);
-    assert_eq!(out.bytes.len(), REFERENCE_BYTES);
-    assert_eq!(out.sha256, REFERENCE_SHA256);
+    let (ws, ctx) = run_workspace(&db, &md);
+    let out = export(&ws, &md, &ctx);
+    let text = decode_sie_bytes(out.bytes.clone());
+    // If these fail: STOP and diff — never adjust content to match the hash.
+    assert_eq!(
+        text,
+        vnext_text(),
+        "decoded text differs from the vNext canonical"
+    );
+    assert_eq!(out.bytes.len(), VNEXT_BYTES);
+    assert_eq!(out.sha256, VNEXT_SHA256);
     assert_eq!(out.vouchers, 2);
     assert_eq!(out.accounts, 4);
-    assert_eq!(decode_sie_bytes(out.bytes.clone()), REFERENCE_TEXT);
     // CRLF on every line including the last; no bare LF anywhere.
     assert!(out.bytes.ends_with(b"\r\n"));
-    let mut i = 0;
-    while i < out.bytes.len() {
-        if out.bytes[i] == b'\n' {
+    for (i, b) in out.bytes.iter().enumerate() {
+        if *b == b'\n' {
             assert!(i > 0 && out.bytes[i - 1] == b'\r', "bare LF at byte {i}");
         }
-        i += 1;
     }
-    assert!(out.bytes.starts_with(b"#FLAGGA 0\r\n"));
-    // Locked omissions and presences.
-    for absent in [
-        "#RAR",
-        "#KPTYP",
-        "#KSUMMA",
-        "#ORGNR",
-        "receipt:",
-        "+",
-        "999999-0006",
-    ] {
-        assert!(!REFERENCE_TEXT.contains(absent), "{absent} must not appear");
+    // DDR-ORDER (Capego RUN-02), line by line.
+    let lines: Vec<&str> = text.split("\r\n").collect();
+    assert_eq!(
+        lines[..9].to_vec(),
+        vec![
+            "#FLAGGA 0",
+            "#PROGRAM \"SIEverk\" \"0.4.0\"",
+            "#FORMAT PC8",
+            "#GEN 20260910",
+            "#SIETYP 4",
+            "#ORGNR 900101-9802",
+            "#FNAMN \"Testgården\"",
+            "#RAR 0 20260101 20261231",
+            "#KONTO 1930 \"Bank\"",
+        ]
+    );
+    for absent in ["#KPTYP", "#KSUMMA", "#IB", "#UB", "#RES", "receipt:", "+"] {
+        assert!(!text.contains(absent), "{absent} must not appear");
     }
-    // Swedish characters as CP437 bytes: å=0x86 ä=0x84 ö=0x94 (in "Testgården", "Ingående", "Bränsle", "Skogsvård").
-    let text_pos = REFERENCE_TEXT.find("Testg").expect("fnamn");
+    // Swedish characters as CP437 bytes: å=0x86 ä=0x84.
     let byte_pos = out
         .bytes
         .windows(5)
         .position(|w| w == b"Testg")
         .expect("fnamn bytes");
     assert_eq!(out.bytes[byte_pos + 5], 0x86, "å");
-    assert!(REFERENCE_TEXT[text_pos + 5..].starts_with("år"));
     assert!(out.bytes.contains(&0x84), "ä present");
     assert!(!out.bytes.contains(&b'?'));
+}
+
+// W1b — the historical 441-byte file is exactly vNext minus the identity lines
+#[test]
+fn w1b_vnext_minus_orgnr_and_rar_is_the_historical_file() {
+    let db = TempDb::new("w1b");
+    let md = masterdata();
+    let (ws, ctx) = run_workspace(&db, &md);
+    let out = export(&ws, &md, &ctx);
+    let text = decode_sie_bytes(out.bytes.clone());
+    assert_eq!(text.matches(ORGNR_LINE).count(), 1);
+    assert_eq!(text.matches(RAR_LINE).count(), 1);
+    let mut bytes = out.bytes.clone();
+    for line in [ORGNR_LINE, RAR_LINE] {
+        let needle = line.as_bytes();
+        let at = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("line present");
+        bytes.drain(at..at + needle.len());
+    }
+    assert_eq!(bytes.len(), HISTORICAL_BYTES);
+    assert_eq!(ws.sha256_hex(&bytes).expect("sha"), HISTORICAL_SHA256);
+    assert_eq!(decode_sie_bytes(bytes), HISTORICAL_TEXT);
 }
 
 // W2 — deterministic across independent workspaces
@@ -157,13 +217,13 @@ fn w2_export_is_deterministic() {
     let a = TempDb::new("w2a");
     let b = TempDb::new("w2b");
     let md = masterdata();
-    let wa = run_workspace(&a, &md);
-    let wb = run_workspace(&b, &md);
-    let ea = export(&wa, &md);
-    let eb = export(&wb, &md);
+    let (wa, ca) = run_workspace(&a, &md);
+    let (wb, cb) = run_workspace(&b, &md);
+    let ea = export(&wa, &md, &ca);
+    let eb = export(&wb, &md, &cb);
     assert_eq!(ea, eb);
     assert_eq!(
-        export(&wa, &md),
+        export(&wa, &md, &ca),
         ea,
         "repeated export of the same workspace"
     );
@@ -174,17 +234,25 @@ fn w2_export_is_deterministic() {
 fn w3_roundtrip_through_existing_parser_and_validator() {
     let db = TempDb::new("w3");
     let md = masterdata();
-    let ws = run_workspace(&db, &md);
-    let out = export(&ws, &md);
+    let (ws, ctx) = run_workspace(&db, &md);
+    let out = export(&ws, &md, &ctx);
     let text = decode_sie_bytes(out.bytes.clone());
     let m = metadata::parse_metadata(&text);
     assert_eq!(m.sie_type, Some(4));
     assert_eq!(m.company_name.as_deref(), Some("Testgården"));
-    assert_eq!(m.org_number, None);
+    assert_eq!(m.org_number.as_deref(), Some("900101-9802"));
     assert_eq!(m.format.as_deref(), Some("PC8"));
     assert!(m.program.as_deref().is_some_and(|p| p.contains("SIEverk")));
     assert_eq!(m.generated_at.as_deref(), Some("20260910"));
-    assert!(m.fiscal_years.is_empty(), "no #RAR");
+    assert_eq!(m.fiscal_years.len(), 1, "exactly #RAR 0");
+    assert_eq!(
+        (
+            m.fiscal_years[0].index,
+            m.fiscal_years[0].start.as_str(),
+            m.fiscal_years[0].end.as_str()
+        ),
+        (0, "20260101", "20261231")
+    );
     let a = accounts::parse_accounts(&text);
     assert_eq!(
         a.accounts
@@ -269,7 +337,7 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
 fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
     let db = TempDb::new("w4");
     let md = masterdata();
-    let ws = run_workspace(&db, &md);
+    let (ws, ctx) = run_workspace(&db, &md);
     let cases = ws.read_cases().expect("cases");
     let lines = ws.read_decision_lines().expect("lines");
     assert_eq!(cases.len(), 27);
@@ -287,7 +355,7 @@ fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
         .iter()
         .filter(|c| c.status == "Manual")
         .all(|c| !lines.iter().any(|l| l.case_seq == c.case_seq)));
-    let out = export(&ws, &md);
+    let out = export(&ws, &md, &ctx);
     let text = decode_sie_bytes(out.bytes);
     assert_eq!(text.matches("#VER ").count(), 2);
     assert_eq!(text.matches("#KONTO ").count(), 4);
@@ -303,18 +371,21 @@ fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
 #[test]
 fn w5_schema_gates_and_verify_run_are_authoritative() {
     let md = masterdata();
+    // A valid context from another, complete run: the schema gate comes first.
+    let dbc = TempDb::new("w5-ctx");
+    let (_wc, ctx) = run_workspace(&dbc, &md);
     // schema 1
     let db1 = TempDb::new("w5-1");
     let raw = fs::read(repo(TESTGARDEN)).expect("fixture");
     let mut ws1 = Workspace::create(db1.path()).expect("create");
     ws1.ingest(&raw).expect("ingest");
     assert!(matches!(
-        write_sie4i(&ws1, &md, &meta()),
+        write_sie4i(&ws1, &md, &ctx, &meta()),
         Err(SieWriteError::NoEngineRun)
     ));
     // schema 2 (reconstructed Slice-2 evidence file)
     let db2 = TempDb::new("w5-2");
-    let ws2 = run_workspace(&db2, &md);
+    let (ws2, ctx2) = run_workspace(&db2, &md);
     sql(&ws2, "DELETE FROM decision_lines");
     let cases = ws2.read_cases().expect("cases");
     let findings = ws2.read_findings().expect("findings");
@@ -330,17 +401,17 @@ fn w5_schema_gates_and_verify_run_are_authoritative() {
     ws2.close().expect("close");
     let ws2 = Workspace::open(db2.path()).expect("schema 2 opens");
     assert!(matches!(
-        write_sie4i(&ws2, &md, &meta()),
+        write_sie4i(&ws2, &md, &ctx2, &meta()),
         Err(SieWriteError::SchemaNotExportable(2))
     ));
     // corrupt schema 3: a mutated persisted amount fails verify_run
     let db3 = TempDb::new("w5-3");
-    let ws3 = run_workspace(&db3, &md);
+    let (ws3, ctx3) = run_workspace(&db3, &md);
     sql(
         &ws3,
-        "UPDATE decision_lines SET debit_ore = debit_ore + 1 WHERE case_seq = 1 AND line_no = 0",
+        "UPDATE decision_lines SET debit_ore = debit_ore + 1 WHERE case_seq = (SELECT min(case_seq) FROM decision_lines) AND line_no = 0",
     );
-    let e = write_sie4i(&ws3, &md, &meta()).expect_err("corrupt");
+    let e = write_sie4i(&ws3, &md, &ctx3, &meta()).expect_err("corrupt");
     assert!(
         matches!(e, SieWriteError::RunNotVerified(WorkspaceError::Corrupt(_))),
         "{e}"
@@ -356,10 +427,10 @@ fn w5_schema_gates_and_verify_run_are_authoritative() {
 fn w6_provenance_and_account_data_fail_closed() {
     let db = TempDb::new("w6");
     let md = masterdata();
-    let ws = run_workspace(&db, &md);
+    let (ws, ctx) = run_workspace(&db, &md);
     let mut wrong = masterdata();
     wrong.chart.version = "2027.1".to_string();
-    let e = write_sie4i(&ws, &wrong, &meta()).expect_err("provenance");
+    let e = write_sie4i(&ws, &wrong, &ctx, &meta()).expect_err("provenance");
     assert!(
         matches!(
             &e,
@@ -372,7 +443,7 @@ fn w6_provenance_and_account_data_fail_closed() {
     );
     let mut wrong = masterdata();
     wrong.ruleset.review_status = "approved".to_string();
-    let e = write_sie4i(&ws, &wrong, &meta()).expect_err("status");
+    let e = write_sie4i(&ws, &wrong, &ctx, &meta()).expect_err("status");
     assert!(
         matches!(
             &e,
@@ -385,7 +456,7 @@ fn w6_provenance_and_account_data_fail_closed() {
     );
     let mut missing = masterdata();
     missing.chart.accounts.retain(|a| a.number != "2640");
-    let e = write_sie4i(&ws, &missing, &meta()).expect_err("missing account");
+    let e = write_sie4i(&ws, &missing, &ctx, &meta()).expect_err("missing account");
     assert!(
         matches!(&e, SieWriteError::AccountNotInChart(n) if n == "2640"),
         "{e}"
@@ -398,49 +469,45 @@ fn w6_provenance_and_account_data_fail_closed() {
         .find(|a| a.number == "1930")
         .expect("acc")
         .name = "  ".to_string();
-    let e = write_sie4i(&ws, &unnamed, &meta()).expect_err("empty name");
+    let e = write_sie4i(&ws, &unnamed, &ctx, &meta()).expect_err("empty name");
     assert!(
         matches!(&e, SieWriteError::InvalidAccountData(n) if n == "1930"),
         "{e}"
     );
 }
 
-// W7 — text rules: control chars, backslash, quote escaping, CP437 strictness
+// W7 — text rules on #FNAMN (from legal_name): strict CP437, escaping,
+// backslash; control characters are already refused by the snapshot parser.
+fn export_with_legal_name(name: &str, tag: &str) -> Result<SieExport, SieWriteError> {
+    let md = masterdata();
+    let db = TempDb::new(tag);
+    let raw = snapshot_with(|v| v["entity"]["accounting_identity"]["legal_name"] = name.into());
+    let (ws, ctx) = run_raw(&db, &raw, &md);
+    write_sie4i(&ws, &md, &ctx, &meta())
+}
+
 #[test]
 fn w7_text_rules_and_strict_cp437() {
-    let db = TempDb::new("w7");
-    let md = masterdata();
-    let ws = run_workspace(&db, &md);
-    let with = |name: &str| ExportMetadata {
-        company_name: name.to_string(),
-        ..meta()
-    };
-    let e = write_sie4i(&ws, &md, &with("Test\tgården")).expect_err("tab");
-    assert!(
-        matches!(e, SieWriteError::ForbiddenControlChar { .. }),
-        "{e}"
-    );
-    let e = write_sie4i(&ws, &md, &with("Test\u{7f}gården")).expect_err("del");
-    assert!(
-        matches!(e, SieWriteError::ForbiddenControlChar { .. }),
-        "{e}"
-    );
-    let e = write_sie4i(&ws, &md, &with("C:\\SIE")).expect_err("backslash");
-    assert!(matches!(e, SieWriteError::ForbiddenBackslash { .. }), "{e}");
-    let e = write_sie4i(&ws, &md, &with("Testgården €")).expect_err("euro");
+    let e = export_with_legal_name("Testgården €", "w7-euro").expect_err("euro");
     assert!(
         matches!(&e, SieWriteError::UnencodableText { ch: '€', .. }),
         "{e}"
     );
-    let e = write_sie4i(&ws, &md, &with("Testgården 😀")).expect_err("emoji");
+    let e = export_with_legal_name("Testgården 😀", "w7-emoji").expect_err("emoji");
     assert!(
         matches!(&e, SieWriteError::UnencodableText { ch: '😀', .. }),
         "{e}"
     );
-    let e = write_sie4i(&ws, &md, &with("   ")).expect_err("empty");
-    assert!(matches!(e, SieWriteError::InvalidExportMetadata(_)), "{e}");
+    let e = export_with_legal_name("C:\\SIE", "w7-bs").expect_err("backslash");
+    assert!(matches!(e, SieWriteError::ForbiddenBackslash { .. }), "{e}");
+    // Control characters never reach the writer: the 1.2 parser refuses them.
+    let ctl = TempDb::new("w7-ctl");
+    let mut ws = Workspace::create(ctl.path()).expect("create");
+    let raw =
+        snapshot_with(|v| v["entity"]["accounting_identity"]["legal_name"] = "Test\tgården".into());
+    assert!(ws.ingest_snapshot(&raw).is_err());
     // Quote escaping and the full Swedish CP437 set survive the round trip.
-    let ok = write_sie4i(&ws, &md, &with("Gården \"Åke\" ÅÄÖ åäö")).expect("quoted");
+    let ok = export_with_legal_name("Gården \"Åke\" ÅÄÖ åäö", "w7-ok").expect("quoted");
     let text = decode_sie_bytes(ok.bytes.clone());
     assert!(
         text.contains("#FNAMN \"Gården \\\"Åke\\\" ÅÄÖ åäö\"\r\n"),
@@ -459,30 +526,10 @@ fn w7_text_rules_and_strict_cp437() {
     assert!(!ok.bytes.contains(&b'?'));
     let m = metadata::parse_metadata(&text);
     assert_eq!(m.company_name.as_deref(), Some("Gården \"Åke\" ÅÄÖ åäö"));
-    // org number: shape enforced, emitted verbatim when supplied
-    let bad = ExportMetadata {
-        org_number: Some("9999990006".to_string()),
-        ..meta()
-    };
-    assert!(matches!(
-        write_sie4i(&ws, &md, &bad),
-        Err(SieWriteError::InvalidExportMetadata(_))
-    ));
-    let with_org = ExportMetadata {
-        org_number: Some("999999-0006".to_string()),
-        ..meta()
-    };
-    let out = write_sie4i(&ws, &md, &with_org).expect("org");
-    let text = decode_sie_bytes(out.bytes);
-    assert!(
-        text.contains("#FNAMN \"Testgården\"\r\n#ORGNR 999999-0006\r\n#KONTO 1930"),
-        "{text}"
-    );
-    assert_ne!(
-        out.sha256, REFERENCE_SHA256,
-        "the canonical file has no #ORGNR"
-    );
     // program identity is explicit input
+    let md = masterdata();
+    let db = TempDb::new("w7-prog");
+    let (ws, ctx) = run_workspace(&db, &md);
     let prog = ExportMetadata {
         program: ProgramId {
             name: "X".into(),
@@ -491,9 +538,60 @@ fn w7_text_rules_and_strict_cp437() {
         ..meta()
     };
     assert!(matches!(
-        write_sie4i(&ws, &md, &prog),
+        write_sie4i(&ws, &md, &ctx, &prog),
         Err(SieWriteError::InvalidExportMetadata(_))
     ));
+}
+
+// W10 — a context bound to another workspace is refused
+#[test]
+fn w10_context_from_another_workspace_is_refused() {
+    let md = masterdata();
+    let a = TempDb::new("w10-a");
+    let b = TempDb::new("w10-b");
+    let (_wa, ctx_a) = run_workspace(&a, &md);
+    let other =
+        snapshot_with(|v| v["entity"]["accounting_identity"]["legal_name"] = "Annan".into());
+    let (wb, _ctx_b) = run_raw(&b, &other, &md);
+    let e = write_sie4i(&wb, &md, &ctx_a, &meta()).expect_err("A context, B workspace");
+    assert!(matches!(e, SieWriteError::ContextNotBound), "{e}");
+}
+
+// W11 — export support is sole traders only (K1 scope)
+#[test]
+fn w11_unsupported_entity_type_is_refused() {
+    let md = masterdata();
+    let db = TempDb::new("w11");
+    let raw = snapshot_with(|v| {
+        let id = &mut v["entity"]["accounting_identity"];
+        id["entity_type"] = "limited_company".into();
+        id["identifier_kind"] = "organisation_number".into();
+        id["business_identifier"] = "999999-0006".into();
+    });
+    let (ws, ctx) = run_raw(&db, &raw, &md);
+    let e = write_sie4i(&ws, &md, &ctx, &meta()).expect_err("AB");
+    assert!(
+        matches!(e, SieWriteError::UnsupportedEntityType("limited_company")),
+        "{e}"
+    );
+    assert!(!e.to_string().contains("999999-0006"));
+}
+
+// W12 — a voucher outside the fiscal period is refused, never repaired
+#[test]
+fn w12_voucher_outside_fiscal_period_is_refused() {
+    let md = masterdata();
+    let db = TempDb::new("w12");
+    // Shortened first year 2026-07-01..2026-12-31: Skogsvård (2026-06-02) is outside.
+    let raw = snapshot_with(|v| {
+        v["fiscal_period"] = serde_json::json!({"start": "2026-07-01", "end": "2026-12-31"})
+    });
+    let (ws, ctx) = run_raw(&db, &raw, &md);
+    let e = write_sie4i(&ws, &md, &ctx, &meta()).expect_err("outside period");
+    assert!(
+        matches!(e, SieWriteError::VoucherOutsideFiscalPeriod { .. }),
+        "{e}"
+    );
 }
 
 // W8 — disk write/read preserves bytes; no snapshot JSON is reopened
@@ -507,16 +605,14 @@ fn w8_disk_roundtrip_and_no_json_reopen() {
     ));
     fs::copy(repo(TESTGARDEN), &copy).expect("copy");
     let raw = fs::read(&copy).expect("read");
-    let mut ws = Workspace::create(db.path()).expect("create");
-    ws.ingest(&raw).expect("ingest");
-    run_engine(&mut ws, &md).expect("run");
+    let (ws, ctx) = run_raw(&db, &raw, &md);
     fs::remove_file(&copy).expect("delete the only JSON");
-    let out = export(&ws, &md);
+    let out = export(&ws, &md, &ctx);
     let path = db.path().with_extension("SI");
     fs::write(&path, &out.bytes).expect("write");
     let back = fs::read(&path).expect("read back");
     assert_eq!(back, out.bytes);
-    assert_eq!(ws.sha256_hex(&back).expect("sha"), REFERENCE_SHA256);
+    assert_eq!(ws.sha256_hex(&back).expect("sha"), VNEXT_SHA256);
     let _ = fs::remove_file(&path);
 }
 
@@ -542,6 +638,9 @@ fn w9_writer_source_invariants() {
         "to_cp437_lossy",
         "display_name",
         "sie_series",
+        "company_name",
+        "org_number",
+        "income_year",
         "unwrap()",
     ] {
         assert!(

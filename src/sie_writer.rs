@@ -8,10 +8,13 @@
 //! balance is repaired, no date is reinterpreted, no Manual case is promoted,
 //! and the snapshot JSON is never read again.
 //!
-//! Locked format (SIE 4B, SV-04 Slice 1 lock 2026-09-10): `#FLAGGA 0` first;
-//! `#PROGRAM "<name>" "<version>"`; `#FORMAT PC8`; `#GEN <YYYYMMDD>` from an
-//! explicit `generated_on` (never a clock); `#SIETYP 4`; `#FNAMN "<explicit
-//! company name>"`; optional `#ORGNR`; no `#RAR`, no `#KPTYP`, no `#KSUMMA`;
+//! Locked format (SIE 4B/4C; SV-04 Slice 1 lock 2026-09-10 + SK-SIE-BRIDGE-04):
+//! `#FLAGGA 0` first; `#PROGRAM "<name>" "<version>"`; `#FORMAT PC8`;
+//! `#GEN <YYYYMMDD>` from an explicit `generated_on` (never a clock);
+//! `#SIETYP 4`; then, in the Capego RUN-02 order (DDR-ORDER), `#ORGNR`,
+//! `#FNAMN` and `#RAR 0`, all taken only from a `VerifiedExportContext`
+//! (never `display_name`, a legacy `org_number`, CLI values or `income_year`);
+//! no `#KPTYP`, no `#KSUMMA`;
 //! `#VER "" "" <date> "<subject>"` (importer-assigned series/number); amounts
 //! as öre with exactly two decimals, debit positive and credit negative;
 //! every text field quoted, `"` escaped as `\"`, control characters and
@@ -23,7 +26,9 @@ use std::fmt;
 use chrono::NaiveDate;
 use codepage_437::{FromCp437, ToCp437, CP437_CONTROL};
 
+use crate::export_context::VerifiedExportContext;
 use crate::ruleset::Masterdata;
+use crate::snapshot::EntityType;
 use crate::workspace::{
     PersistedCase, PersistedLine, RunMeta, Workspace, WorkspaceError, WORKSPACE_SCHEMA_DECISIONS,
 };
@@ -35,14 +40,11 @@ pub struct ProgramId {
     pub version: String,
 }
 
-/// Serialization-only metadata. Nothing here carries accounting state.
+/// Serialization-only metadata. Nothing here carries accounting state or
+/// identity: `#FNAMN`, `#ORGNR` and `#RAR 0` come only from the
+/// `VerifiedExportContext` (SK-SIE-BRIDGE-04).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportMetadata {
-    /// `#FNAMN` — explicit export identity (Slice 1: `"Testgården"`). The
-    /// workspace's `display_name` is deliberately not used as a legal name.
-    pub company_name: String,
-    /// `#ORGNR` — emitted only when `Some`; must already be `NNNNNN-NNNN`.
-    pub org_number: Option<String>,
     /// `#GEN` — the file generation date, supplied by the caller.
     pub generated_on: NaiveDate,
     pub program: ProgramId,
@@ -95,6 +97,14 @@ pub enum SieWriteError {
         reason: String,
     },
     Io(String),
+    /// The export context was bound to another snapshot than this run.
+    ContextNotBound,
+    /// Export is supported only for sole traders in the current K1 scope.
+    UnsupportedEntityType(&'static str),
+    /// An exported voucher's date lies outside the context's fiscal period.
+    VoucherOutsideFiscalPeriod {
+        case_seq: i32,
+    },
 }
 
 impl fmt::Display for SieWriteError {
@@ -135,6 +145,17 @@ impl fmt::Display for SieWriteError {
                 write!(f, "case {case_seq}: {reason}")
             }
             Self::Io(m) => write!(f, "io: {m}"),
+            Self::ContextNotBound => write!(
+                f,
+                "the export context was not bound to this workspace's verified run"
+            ),
+            Self::UnsupportedEntityType(t) => write!(
+                f,
+                "SIE export is supported only for sole traders (entity type {t})"
+            ),
+            Self::VoucherOutsideFiscalPeriod { case_seq } => {
+                write!(f, "case {case_seq}: voucher date is outside the fiscal period")
+            }
         }
     }
 }
@@ -231,7 +252,9 @@ fn sie_date(d: NaiveDate) -> String {
     d.format("%Y%m%d").to_string()
 }
 
-fn is_org_number_shape(s: &str) -> bool {
+/// Defensive second layer (the snapshot parser has fully validated the
+/// identifier already): exact 11-byte ASCII `DDDDDD-DDDD`.
+fn is_wire_identifier_shape(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 11
         && b[..6].iter().all(u8::is_ascii_digit)
@@ -339,6 +362,7 @@ fn eligible_vouchers<'a>(
 pub fn write_sie4i(
     workspace: &Workspace,
     masterdata: &Masterdata,
+    context: &VerifiedExportContext,
     meta: &ExportMetadata,
 ) -> Result<SieExport, SieWriteError> {
     // 1. Schema gate.
@@ -351,32 +375,50 @@ pub fn write_sie4i(
     }
     // 2. The authoritative verifier.
     let run = workspace.verify_run()?;
-    // 3. Provenance before any account name is read.
-    check_provenance(&run, masterdata)?;
-    // 4. Export metadata.
-    if meta.company_name.trim().is_empty() {
-        return Err(SieWriteError::InvalidExportMetadata(
-            "company_name is empty".to_string(),
+    // 3. The context must belong to exactly this run (a context bound to
+    //    workspace A is never written with workspace B).
+    if context.snapshot_sha256() != run.provenance.snapshot_sha256 {
+        return Err(SieWriteError::ContextNotBound);
+    }
+    // 4. Current K1 export scope: sole traders only.
+    if context.entity_type() != EntityType::SoleTrader {
+        return Err(SieWriteError::UnsupportedEntityType(
+            context.entity_type().as_str(),
         ));
     }
+    // 5. Provenance before any account name is read.
+    check_provenance(&run, masterdata)?;
+    // 6. Export metadata.
     if meta.program.name.trim().is_empty() || meta.program.version.trim().is_empty() {
         return Err(SieWriteError::InvalidExportMetadata(
             "program name and version are required".to_string(),
         ));
     }
-    if let Some(org) = &meta.org_number {
-        if !is_org_number_shape(org) {
-            return Err(SieWriteError::InvalidExportMetadata(format!(
-                "org_number {org:?} is not NNNNNN-NNNN"
-            )));
-        }
-    }
-    // 5. Readback and eligibility.
+    // 7. Readback and eligibility.
     let cases = workspace.read_cases()?;
     let lines = workspace.read_decision_lines()?;
     let vouchers = eligible_vouchers(&cases, &lines)?;
 
-    // 6. Used accounts, ascending, with names proven from the exact chart.
+    // 8. Every exported voucher lies inside the fiscal period — never repaired,
+    //    never dropped.
+    let period = context.fiscal_period();
+    if let Some(v) = vouchers
+        .iter()
+        .find(|v| v.case.date < period.start || v.case.date > period.end)
+    {
+        return Err(SieWriteError::VoucherOutsideFiscalPeriod {
+            case_seq: v.case.case_seq,
+        });
+    }
+
+    // 9. Defensive identifier shape (fixed text; the value is never echoed).
+    if !is_wire_identifier_shape(context.business_identifier()) {
+        return Err(SieWriteError::CorruptEvidence(
+            "business identifier in the export context is not NNNNNN-NNNN".to_string(),
+        ));
+    }
+
+    // 10. Used accounts, ascending, with names proven from the exact chart.
     let used: BTreeSet<&str> = vouchers
         .iter()
         .flat_map(|v| v.lines.iter().map(|l| l.account.as_str()))
@@ -396,7 +438,7 @@ pub fn write_sie4i(
         ));
     }
 
-    // 7. Build text lines (validated), then encode strictly.
+    // 11. Build text lines (validated), then encode strictly.
     let mut text_lines: Vec<(String, String)> = Vec::new(); // (field label, line)
     text_lines.push(("#FLAGGA".into(), "#FLAGGA 0".into()));
     text_lines.push((
@@ -413,13 +455,19 @@ pub fn write_sie4i(
         format!("#GEN {}", sie_date(meta.generated_on)),
     ));
     text_lines.push(("#SIETYP".into(), "#SIETYP 4".into()));
+    // DDR-ORDER (Capego RUN-02): #ORGNR, #FNAMN, #RAR 0.
+    text_lines.push((
+        "#ORGNR".into(),
+        format!("#ORGNR {}", context.business_identifier()),
+    ));
     text_lines.push((
         "#FNAMN".into(),
-        format!("#FNAMN {}", quoted("#FNAMN", &meta.company_name)?),
+        format!("#FNAMN {}", quoted("#FNAMN", context.legal_name())?),
     ));
-    if let Some(org) = &meta.org_number {
-        text_lines.push(("#ORGNR".into(), format!("#ORGNR {org}")));
-    }
+    text_lines.push((
+        "#RAR".into(),
+        format!("#RAR 0 {} {}", sie_date(period.start), sie_date(period.end)),
+    ));
     for (number, name) in &konto_lines {
         text_lines.push((
             format!("#KONTO {number}"),
