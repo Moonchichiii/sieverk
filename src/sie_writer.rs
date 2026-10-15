@@ -15,7 +15,10 @@
 //! `#FNAMN` and `#RAR 0`, all taken only from a `VerifiedExportContext`
 //! (never `display_name`, a legacy `org_number`, CLI values or `income_year`);
 //! no `#KPTYP`, no `#KSUMMA`;
-//! `#VER "" "" <date> "<subject>"` (importer-assigned series/number); amounts
+//! `#VER "A" "" <date> "<subject>"`: the voucher series is the entity's
+//! `sie_series`, accepted only when exactly `"A"` (the series verified against
+//! Capego, D0–D4 2026-10); the voucher number is always blank and assigned by
+//! the importer (CASE A — SIEverk never owns voucher numbers); amounts
 //! as öre with exactly two decimals, debit positive and credit negative;
 //! every text field quoted, `"` escaped as `\"`, control characters and
 //! literal backslashes refused; strict CP437 (never lossy); CRLF everywhere.
@@ -39,6 +42,11 @@ pub struct ProgramId {
     pub name: String,
     pub version: String,
 }
+
+/// The only voucher series v1 exports (Capego-verified, SK-SIE-BRIDGE-04
+/// Addendum 3). Read from the entity's own setting and refused otherwise —
+/// never used as a fallback.
+const VERIFIED_VOUCHER_SERIES: &str = "A";
 
 /// Serialization-only metadata. Nothing here carries accounting state or
 /// identity: `#FNAMN`, `#ORGNR` and `#RAR 0` come only from the
@@ -105,6 +113,8 @@ pub enum SieWriteError {
     VoucherOutsideFiscalPeriod {
         case_seq: i32,
     },
+    /// The entity's voucher series is missing or not the Capego-verified `A`.
+    UnsupportedVoucherSeries,
 }
 
 impl fmt::Display for SieWriteError {
@@ -156,6 +166,10 @@ impl fmt::Display for SieWriteError {
             Self::VoucherOutsideFiscalPeriod { case_seq } => {
                 write!(f, "case {case_seq}: voucher date is outside the fiscal period")
             }
+            Self::UnsupportedVoucherSeries => write!(
+                f,
+                "SIE export currently supports voucher series A only (Capego-verified)"
+            ),
         }
     }
 }
@@ -394,6 +408,14 @@ pub fn write_sie4i(
             "program name and version are required".to_string(),
         ));
     }
+    // 6b. Voucher series: the entity's own setting, accepted only when it is
+    //     exactly the Capego-verified series; anything else (including none)
+    //     is refused — an unproven series can make the importer silently
+    //     import nothing (Capego D3).
+    let series = workspace.read_entity()?.sie_series;
+    if series.as_deref() != Some(VERIFIED_VOUCHER_SERIES) {
+        return Err(SieWriteError::UnsupportedVoucherSeries);
+    }
     // 7. Readback and eligibility.
     let cases = workspace.read_cases()?;
     let lines = workspace.read_decision_lines()?;
@@ -496,7 +518,11 @@ pub fn write_sie4i(
             return Err(SieWriteError::VoucherNotBalanced { case_seq: seq, sum });
         }
         let field = format!("#VER case {seq}");
-        let mut ver = format!("#VER \"\" \"\" {}", sie_date(v.case.date));
+        // CASE A: series set, number blank (importer-assigned).
+        let mut ver = format!(
+            "#VER \"{VERIFIED_VOUCHER_SERIES}\" \"\" {}",
+            sie_date(v.case.date)
+        );
         if let Some(subject) = &v.case.subject {
             ver.push(' ');
             ver.push_str(&quoted(&field, subject)?);

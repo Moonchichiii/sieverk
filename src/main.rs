@@ -921,9 +921,10 @@ mod tests {
 
     const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
     const TESTGARDEN_12: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
-    /// vNext canonical Testgården (BRIDGE-04): 487 bytes.
+    /// vNext canonical Testgården (BRIDGE-04, CASE A — voucher series "A",
+    /// importer-assigned numbers): 489 bytes.
     const TESTGARDEN_VNEXT_SHA256: &str =
-        "b977601f45b5a5495dead24849393f19626fa17d0d9c6b7f50d64d33e418dd0b";
+        "76c84ace25dc5ea19535b10f65db2d311c86bce25b74a9f7b0a811ea522a61c8";
 
     fn export_opts(name: &str, snapshot: &str) -> (TempDb, TempDb, ExportOptions) {
         let db = TempDb::new(name);
@@ -945,7 +946,7 @@ mod tests {
         let (_db, _out, opts) = export_opts("export", TESTGARDEN_12);
         let text = export_sie(&opts).expect("export");
         let bytes = std::fs::read(&opts.out).expect("out file");
-        assert_eq!(bytes.len(), 487, "{text}");
+        assert_eq!(bytes.len(), 489, "{text}");
         assert!(
             text.contains(&format!("si_sha256={TESTGARDEN_VNEXT_SHA256}\n")),
             "{text}"

@@ -483,8 +483,9 @@ fn engine_semantics_are_unchanged_between_1_1_and_1_2() {
 
 #[test]
 fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
-    // SK-SIE-BRIDGE-04: the writer now takes identity only from the context.
-    // Removing exactly #ORGNR and #RAR 0 from the vNext file must give the
+    // SK-SIE-BRIDGE-04: the writer takes identity only from the context and
+    // writes voucher series "A" with a blank number (CASE A). Reverting the
+    // two series to blank and removing exactly #ORGNR and #RAR 0 must give the
     // historical Slice-1 bytes — the accounting content is unchanged.
     let md = masterdata();
     let db = TempDb::new("writer-regression");
@@ -498,15 +499,20 @@ fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
         },
     };
     let out = write_sie4i(&ws, &md, &ctx, &meta).expect("export");
-    assert_eq!(out.bytes.len(), 487);
+    assert_eq!(out.bytes.len(), 489);
     let mut bytes = out.bytes.clone();
-    for line in ["#ORGNR 900101-9802\r\n", "#RAR 0 20260101 20261231\r\n"] {
-        let needle = line.as_bytes();
+    for (from, to) in [
+        ("#VER \"A\" \"\" ", "#VER \"\" \"\" "),
+        ("#VER \"A\" \"\" ", "#VER \"\" \"\" "),
+        ("#ORGNR 900101-9802\r\n", ""),
+        ("#RAR 0 20260101 20261231\r\n", ""),
+    ] {
+        let needle = from.as_bytes();
         let at = bytes
             .windows(needle.len())
             .position(|w| w == needle)
-            .expect("line present once");
-        bytes.drain(at..at + needle.len());
+            .expect("needle present");
+        bytes.splice(at..at + needle.len(), to.bytes());
     }
     assert_eq!(bytes.len(), 441);
     assert_eq!(ws.sha256_hex(&bytes).expect("sha"), HISTORICAL_SI_SHA256);
