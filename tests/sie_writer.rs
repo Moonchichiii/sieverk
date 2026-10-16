@@ -1,13 +1,14 @@
 //! sie_writer (SV-04 Slice 1 + SK-SIE-BRIDGE-04) — real Testgården snapshot
 //! 1.2, real DuckDB workspace, real synthetic masterdata, real SV-03 engine
 //! run, real `VerifiedExportContext`, real SIE 4I bytes. No mocks.
-//! The golden is the vNext canonical file (489 bytes, sha256 76c84ace…61c8):
-//! the historical 441-byte Slice-1 file (3fc89f8b…0660) plus `#ORGNR` and
-//! `#RAR 0` in the Capego RUN-02 order and voucher series `A` with a blank,
-//! importer-assigned number (CASE A, Capego D0–D4). Two earlier vectors stay
+//! The golden is the vNext canonical file (CASE B, SK-SIE-BRIDGE-04
+//! Addendum 4; hash locked from the real writer bytes): the historical
+//! 441-byte Slice-1 file (3fc89f8b…0660) plus `#ORGNR` and `#RAR 0` in the
+//! Capego RUN-02 order, and every `#VER` with a blank series and a
+//! writer-assigned number `1..N` in emission order. Two earlier vectors stay
 //! evidence and are proven as exact reductions of the golden: the pre-D3
-//! BRIDGE-04 file (487 bytes, b977601f…dd0b, blank series) and the historical
-//! Slice-1 file.
+//! BRIDGE-04 file (487 bytes, b977601f…dd0b, blank series and number) and the
+//! historical Slice-1 file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use sieverk::export_context::VerifiedExportContext;
 use sieverk::money::Ore;
 use sieverk::ruleset::{load_masterdata, Masterdata};
 use sieverk::sie_writer::{write_sie4i, ExportMetadata, ProgramId, SieExport, SieWriteError};
-use sieverk::validator::{validate, Code, Severity};
+use sieverk::validator::{validate, Code};
 use sieverk::workspace::{Workspace, WorkspaceError, WORKSPACE_SCHEMA_DECISIONS};
 use sieverk::{accounts, decode_sie_bytes, metadata, vouchers};
 
@@ -26,12 +27,13 @@ const TESTGARDEN: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
 const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
 const HISTORICAL_SHA256: &str = "3fc89f8b504f883d0a4444e11e5389c25b99f201b0bfdaf88a65c74a23e20660";
 const HISTORICAL_BYTES: usize = 441;
-const VNEXT_SHA256: &str = "76c84ace25dc5ea19535b10f65db2d311c86bce25b74a9f7b0a811ea522a61c8";
+const VNEXT_SHA256: &str = "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
 const VNEXT_BYTES: usize = 489;
-/// BRIDGE-04 pre-D3 compatibility vector (blank series): historical evidence.
+/// BRIDGE-04 pre-D3 compatibility vector (blank series and number): evidence.
 const PRE_D3_SHA256: &str = "b977601f45b5a5495dead24849393f19626fa17d0d9c6b7f50d64d33e418dd0b";
 const PRE_D3_BYTES: usize = 487;
-const VER_SERIES_A: &str = "#VER \"A\" \"\" ";
+const VER_NUM_1: &str = "#VER \"\" \"1\" ";
+const VER_NUM_2: &str = "#VER \"\" \"2\" ";
 const VER_BLANK: &str = "#VER \"\" \"\" ";
 const ORGNR_LINE: &str = "#ORGNR 900101-9802\r\n";
 const RAR_LINE: &str = "#RAR 0 20260101 20261231\r\n";
@@ -99,7 +101,8 @@ fn vnext_text() -> String {
     HISTORICAL_TEXT
         .replacen("#FNAMN", &format!("{ORGNR_LINE}#FNAMN"), 1)
         .replacen("#KONTO 1930", &format!("{RAR_LINE}#KONTO 1930"), 1)
-        .replace(VER_BLANK, VER_SERIES_A)
+        .replacen(VER_BLANK, VER_NUM_1, 1)
+        .replacen(VER_BLANK, VER_NUM_2, 1)
 }
 
 /// Replace exactly one occurrence of `from` with `to` in raw bytes.
@@ -207,7 +210,8 @@ fn w1_testgarden_export_matches_the_vnext_canonical_exactly() {
     assert!(!out.bytes.contains(&b'?'));
 }
 
-// W1b — the golden reduces exactly to both earlier vectors
+// W1b — the golden reduces exactly to both earlier vectors (unchanged
+// accounting content; this transformation does not authorise blank numbers)
 #[test]
 fn w1b_vnext_reduces_to_the_pre_d3_and_historical_files() {
     let db = TempDb::new("w1b");
@@ -217,12 +221,13 @@ fn w1b_vnext_reduces_to_the_pre_d3_and_historical_files() {
     let text = decode_sie_bytes(out.bytes.clone());
     assert_eq!(text.matches(ORGNR_LINE).count(), 1);
     assert_eq!(text.matches(RAR_LINE).count(), 1);
-    assert_eq!(text.matches(VER_SERIES_A).count(), 2);
+    assert_eq!(text.matches(VER_NUM_1).count(), 1);
+    assert_eq!(text.matches(VER_NUM_2).count(), 1);
     assert_eq!(text.matches(VER_BLANK).count(), 0);
-    // 1. Series A -> blank gives exactly the pre-D3 BRIDGE-04 vector.
+    // 1. Numbers 1 and 2 -> blank gives exactly the pre-D3 BRIDGE-04 vector.
     let mut bytes = out.bytes.clone();
-    for _ in 0..2 {
-        replace_once(&mut bytes, VER_SERIES_A.as_bytes(), VER_BLANK.as_bytes());
+    for numbered in [VER_NUM_1, VER_NUM_2] {
+        replace_once(&mut bytes, numbered.as_bytes(), VER_BLANK.as_bytes());
     }
     assert_eq!(bytes.len(), PRE_D3_BYTES);
     assert_eq!(ws.sha256_hex(&bytes).expect("sha"), PRE_D3_SHA256);
@@ -300,7 +305,7 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
             first.number.as_str(),
             first.date.as_str()
         ),
-        ("A", "", "20260820")
+        ("", "1", "20260820")
     );
     assert_eq!(first.text.as_deref(), Some("Bränsle"));
     assert_eq!(
@@ -322,7 +327,7 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
             second.number.as_str(),
             second.date.as_str()
         ),
-        ("A", "", "20260602")
+        ("", "2", "20260602")
     );
     assert_eq!(second.text.as_deref(), Some("Skogsvård"));
     assert_eq!(
@@ -341,20 +346,16 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
         let sum: Ore = vo.rows.iter().map(|r| r.amount).sum();
         assert_eq!(sum, Ore(0));
     }
-    // Validator: zero errors; exactly one warning — the existing validator keys
-    // duplicates on (series, number) and two importer-assigned ("A", "")
-    // vouchers therefore trigger DUPLICATE_VOUCHER_NUMBER. Locked as an
-    // internal validator expectation (U-P2-1); never silenced by inventing
-    // numbers (CASE A: the importer assigns them).
+    // Validator: zero errors and zero warnings. The validator keys duplicates
+    // on (series, number); CASE B numbers ("", "1") and ("", "2") are unique,
+    // so DUPLICATE_VOUCHER_NUMBER (expected only for blank numbers) is gone.
     let report = validate(&m, &a, &v);
     assert_eq!(report.error_count(), 0, "{:?}", report.findings);
-    assert_eq!(report.warning_count(), 1, "{:?}", report.findings);
-    let w = report
+    assert_eq!(report.warning_count(), 0, "{:?}", report.findings);
+    assert!(!report
         .findings
         .iter()
-        .find(|f| f.severity == Severity::Warning)
-        .expect("warning");
-    assert_eq!(w.code, Code::DuplicateVoucherNumber);
+        .any(|f| f.code == Code::DuplicateVoucherNumber));
 }
 
 // W4 — Manual and zero-line decisions are never vouchers; only used accounts declared
@@ -390,6 +391,72 @@ fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
     // Grusgropen (rounding / supplier credit) and every Manual case are absent.
     assert!(!text.contains("Grus och material"));
     assert!(!text.contains("Annat"));
+}
+
+// W4b — numbering consumes ordinals only for exported vouchers: a Manual case
+// before the first export and a zero-line Conditional case between two exports
+// get no number; no gaps, no duplicates, case_seq emission order preserved.
+#[test]
+fn w4b_numbering_skips_manual_and_zero_line_cases() {
+    let md = masterdata();
+    let db = TempDb::new("w4b");
+    // Move receipt 18 ("Grus och material", a zero-line Conditional decision)
+    // to directly after receipt 1 (Bränsle). selector_position is the snapshot
+    // order, so it becomes case_seq 2 — between the two exported vouchers.
+    let raw = snapshot_with(|v| {
+        let receipts = v["receipts"].as_array_mut().expect("receipts");
+        let from = receipts
+            .iter()
+            .position(|r| r["id"] == 18)
+            .expect("receipt 18");
+        let grus = receipts.remove(from);
+        let after = receipts
+            .iter()
+            .position(|r| r["id"] == 1)
+            .expect("receipt 1");
+        receipts.insert(after + 1, grus);
+    });
+    let (ws, ctx) = run_raw(&db, &raw, &md);
+    let cases = ws.read_cases().expect("cases");
+    let lines = ws.read_decision_lines().expect("lines");
+    let line_count = |seq: i32| lines.iter().filter(|l| l.case_seq == seq).count();
+    let shape: Vec<(i32, &str, &str, usize)> = cases
+        .iter()
+        .take(7)
+        .map(|c| {
+            (
+                c.case_seq,
+                c.subject.as_deref().unwrap_or(""),
+                c.status.as_str(),
+                line_count(c.case_seq),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape[0].2, "Manual",
+        "a Manual case precedes the first export"
+    );
+    assert_eq!(shape[0].3, 0);
+    assert_eq!(shape[1], (1, "Bränsle", "Conditional", 3));
+    assert_eq!(shape[2], (2, "Grus och material", "Conditional", 0));
+    assert_eq!(shape[6], (6, "Skogsvård", "Conditional", 3));
+    for s in &shape[3..6] {
+        assert_eq!((s.2, s.3), ("Manual", 0), "{s:?}");
+    }
+    let out = export(&ws, &md, &ctx);
+    let text = decode_sie_bytes(out.bytes.clone());
+    let v = vouchers::parse_vouchers(&text);
+    assert_eq!(
+        v.vouchers
+            .iter()
+            .map(|x| (x.series.as_str(), x.number.as_str(), x.date.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("", "1", "20260820"), ("", "2", "20260602")]
+    );
+    assert!(!text.contains("Grus och material"));
+    // Same exported content, same numbers, same bytes as the canonical file.
+    assert_eq!(text, vnext_text());
+    assert_eq!(out.sha256, VNEXT_SHA256);
 }
 
 // W5 — schema 1 and schema 2 cannot export; corrupt schema 3 cannot export
@@ -665,6 +732,8 @@ fn w9_writer_source_invariants() {
         "company_name",
         "org_number",
         "income_year",
+        "sie_series",
+        "read_entity",
         "unwrap()",
     ] {
         assert!(
@@ -699,7 +768,8 @@ fn w9_writer_source_invariants() {
     );
 }
 
-// W13 — voucher series: only the entity's own, Capego-verified "A" is exported
+// W13 — the stored voucher-series setting is never read: any value, or none,
+// gives byte-identical CASE B output (Addendum 4 §4)
 fn export_with_series(series: &str, tag: &str) -> Result<SieExport, SieWriteError> {
     let md = masterdata();
     let db = TempDb::new(tag);
@@ -709,47 +779,48 @@ fn export_with_series(series: &str, tag: &str) -> Result<SieExport, SieWriteErro
 }
 
 #[test]
-fn w13_unsupported_voucher_series_is_refused_with_no_bytes() {
+fn w13_voucher_series_setting_does_not_affect_the_export() {
     for (series, tag) in [
+        ("A", "w13-a"),
         ("SK", "w13-sk"),
         ("B", "w13-b"),
         ("a", "w13-lower"),
         (" A", "w13-space"),
         ("", "w13-empty"),
     ] {
-        let e = export_with_series(series, tag).expect_err(series);
-        assert!(
-            matches!(e, SieWriteError::UnsupportedVoucherSeries),
-            "{series:?}: {e}"
-        );
-        let msg = e.to_string();
-        for secret in ["900101-9802", "9001019802", "Testgården"] {
-            assert!(!msg.contains(secret), "{secret} leaked: {msg}");
-        }
+        let out = export_with_series(series, tag).expect(series);
+        assert_eq!(out.sha256, VNEXT_SHA256, "{series:?}");
+        assert_eq!(decode_sie_bytes(out.bytes), vnext_text(), "{series:?}");
     }
-    // A missing series (NULL in the verified workspace) is refused the same way;
+    // A missing series (NULL in the verified workspace) changes nothing either;
     // entity_context is outside the decision digest, so verify_run still passes.
     let md = masterdata();
     let db = TempDb::new("w13-null");
     let (ws, ctx) = run_workspace(&db, &md);
     sql(&ws, "UPDATE entity_context SET sie_series = NULL");
-    assert!(matches!(
-        write_sie4i(&ws, &md, &ctx, &meta()),
-        Err(SieWriteError::UnsupportedVoucherSeries)
-    ));
+    let out = write_sie4i(&ws, &md, &ctx, &meta()).expect("NULL series exports");
+    assert_eq!(out.sha256, VNEXT_SHA256);
 }
 
 #[test]
-fn w13b_series_a_and_blank_number_on_every_voucher() {
-    let out = export_with_series("A", "w13-a").expect("A is supported");
+fn w13b_blank_series_and_contiguous_numbers_on_every_voucher() {
+    let db = TempDb::new("w13b");
+    let md = masterdata();
+    let (ws, ctx) = run_workspace(&db, &md);
+    let out = export(&ws, &md, &ctx);
     let text = decode_sie_bytes(out.bytes.clone());
     let v = vouchers::parse_vouchers(&text);
     assert_eq!(v.vouchers.len(), 2);
     assert_eq!(v.vouchers.iter().map(|x| x.rows.len()).sum::<usize>(), 6);
-    for vo in &v.vouchers {
-        assert_eq!((vo.series.as_str(), vo.number.as_str()), ("A", ""));
+    for (i, vo) in v.vouchers.iter().enumerate() {
+        let expected = (i + 1).to_string();
+        assert_eq!(
+            (vo.series.as_str(), vo.number.as_str()),
+            ("", expected.as_str())
+        );
     }
     assert_eq!(text.matches("#VER ").count(), 2);
-    assert_eq!(text.matches(VER_SERIES_A).count(), 2);
+    assert_eq!(text.matches("#TRANS ").count(), 6);
+    assert_eq!(text.matches(VER_BLANK).count(), 0);
     assert_eq!(out.sha256, VNEXT_SHA256);
 }

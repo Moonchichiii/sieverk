@@ -15,10 +15,12 @@
 //! `#FNAMN` and `#RAR 0`, all taken only from a `VerifiedExportContext`
 //! (never `display_name`, a legacy `org_number`, CLI values or `income_year`);
 //! no `#KPTYP`, no `#KSUMMA`;
-//! `#VER "A" "" <date> "<subject>"`: the voucher series is the entity's
-//! `sie_series`, accepted only when exactly `"A"` (the series verified against
-//! Capego, D0–D4 2026-10); the voucher number is always blank and assigned by
-//! the importer (CASE A — SIEverk never owns voucher numbers); amounts
+//! `#VER "" "<n>" <date> "<subject>"` (CASE B, SK-SIE-BRIDGE-04 Addendum 4):
+//! the voucher series is always blank and the writer owns the number — `n` is
+//! a plain base-10 ordinal `1..N` over the vouchers actually emitted, in
+//! emission (`case_seq`) order, file-local and never derived from ids, keys,
+//! dates or clocks; the entity's stored voucher-series setting is not read,
+//! validated or emitted; amounts
 //! as öre with exactly two decimals, debit positive and credit negative;
 //! every text field quoted, `"` escaped as `\"`, control characters and
 //! literal backslashes refused; strict CP437 (never lossy); CRLF everywhere.
@@ -42,11 +44,6 @@ pub struct ProgramId {
     pub name: String,
     pub version: String,
 }
-
-/// The only voucher series v1 exports (Capego-verified, SK-SIE-BRIDGE-04
-/// Addendum 3). Read from the entity's own setting and refused otherwise —
-/// never used as a fallback.
-const VERIFIED_VOUCHER_SERIES: &str = "A";
 
 /// Serialization-only metadata. Nothing here carries accounting state or
 /// identity: `#FNAMN`, `#ORGNR` and `#RAR 0` come only from the
@@ -113,8 +110,6 @@ pub enum SieWriteError {
     VoucherOutsideFiscalPeriod {
         case_seq: i32,
     },
-    /// The entity's voucher series is missing or not the Capego-verified `A`.
-    UnsupportedVoucherSeries,
 }
 
 impl fmt::Display for SieWriteError {
@@ -166,10 +161,6 @@ impl fmt::Display for SieWriteError {
             Self::VoucherOutsideFiscalPeriod { case_seq } => {
                 write!(f, "case {case_seq}: voucher date is outside the fiscal period")
             }
-            Self::UnsupportedVoucherSeries => write!(
-                f,
-                "SIE export currently supports voucher series A only (Capego-verified)"
-            ),
         }
     }
 }
@@ -408,14 +399,6 @@ pub fn write_sie4i(
             "program name and version are required".to_string(),
         ));
     }
-    // 6b. Voucher series: the entity's own setting, accepted only when it is
-    //     exactly the Capego-verified series; anything else (including none)
-    //     is refused — an unproven series can make the importer silently
-    //     import nothing (Capego D3).
-    let series = workspace.read_entity()?.sie_series;
-    if series.as_deref() != Some(VERIFIED_VOUCHER_SERIES) {
-        return Err(SieWriteError::UnsupportedVoucherSeries);
-    }
     // 7. Readback and eligibility.
     let cases = workspace.read_cases()?;
     let lines = workspace.read_decision_lines()?;
@@ -496,7 +479,10 @@ pub fn write_sie4i(
             format!("#KONTO {number} {name}"),
         ));
     }
-    for v in &vouchers {
+    // CASE B: the writer numbers exactly the vouchers it emits, 1..N in
+    // emission order. `vouchers` already holds only exportable decisions, so
+    // Manual, zero-line and excluded cases never consume a number.
+    for (ordinal, v) in (1_usize..).zip(&vouchers) {
         let seq = v.case.case_seq;
         let mut sum: i64 = 0;
         let mut trans: Vec<String> = Vec::with_capacity(v.lines.len());
@@ -518,11 +504,8 @@ pub fn write_sie4i(
             return Err(SieWriteError::VoucherNotBalanced { case_seq: seq, sum });
         }
         let field = format!("#VER case {seq}");
-        // CASE A: series set, number blank (importer-assigned).
-        let mut ver = format!(
-            "#VER \"{VERIFIED_VOUCHER_SERIES}\" \"\" {}",
-            sie_date(v.case.date)
-        );
+        // CASE B: blank series, writer-assigned number.
+        let mut ver = format!("#VER \"\" \"{ordinal}\" {}", sie_date(v.case.date));
         if let Some(subject) = &v.case.subject {
             ver.push(' ');
             ver.push_str(&quoted(&field, subject)?);

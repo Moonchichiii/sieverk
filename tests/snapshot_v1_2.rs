@@ -484,9 +484,10 @@ fn engine_semantics_are_unchanged_between_1_1_and_1_2() {
 #[test]
 fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
     // SK-SIE-BRIDGE-04: the writer takes identity only from the context and
-    // writes voucher series "A" with a blank number (CASE A). Reverting the
-    // two series to blank and removing exactly #ORGNR and #RAR 0 must give the
-    // historical Slice-1 bytes — the accounting content is unchanged.
+    // writes a blank series with writer-assigned numbers 1..N (CASE B,
+    // Addendum 4). Restoring the two numbers to blank and removing exactly
+    // #ORGNR and #RAR 0 must give the historical Slice-1 bytes — the
+    // accounting content is unchanged.
     let md = masterdata();
     let db = TempDb::new("writer-regression");
     let (ws, ingested) = engine_run(&db, &read(V12), &md);
@@ -502,8 +503,8 @@ fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
     assert_eq!(out.bytes.len(), 489);
     let mut bytes = out.bytes.clone();
     for (from, to) in [
-        ("#VER \"A\" \"\" ", "#VER \"\" \"\" "),
-        ("#VER \"A\" \"\" ", "#VER \"\" \"\" "),
+        ("#VER \"\" \"1\" ", "#VER \"\" \"\" "),
+        ("#VER \"\" \"2\" ", "#VER \"\" \"\" "),
         ("#ORGNR 900101-9802\r\n", ""),
         ("#RAR 0 20260101 20261231\r\n", ""),
     ] {

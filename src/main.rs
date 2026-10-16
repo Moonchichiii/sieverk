@@ -921,10 +921,10 @@ mod tests {
 
     const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
     const TESTGARDEN_12: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
-    /// vNext canonical Testgården (BRIDGE-04, CASE A — voucher series "A",
-    /// importer-assigned numbers): 489 bytes.
+    /// vNext canonical Testgården (BRIDGE-04, CASE B — blank series,
+    /// writer-assigned numbers 1..N): locked from the real writer bytes.
     const TESTGARDEN_VNEXT_SHA256: &str =
-        "76c84ace25dc5ea19535b10f65db2d311c86bce25b74a9f7b0a811ea522a61c8";
+        "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
 
     fn export_opts(name: &str, snapshot: &str) -> (TempDb, TempDb, ExportOptions) {
         let db = TempDb::new(name);
