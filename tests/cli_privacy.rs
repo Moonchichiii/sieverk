@@ -171,9 +171,20 @@ fn export_args<'a>(
         workspace.as_os_str(),
         OsStr::new("--out"),
         out.as_os_str(),
+        OsStr::new("--manifest"),
+        manifest_for(out).as_os_str(),
         OsStr::new("--generated-on"),
         OsStr::new("2026-09-10"),
     ]
+}
+
+/// SIE-COMPLETE-01: the manifest next to `out` (`<out>.manifest.json`).
+/// Leaked on purpose so `export_args` keeps returning borrowed `OsStr`s —
+/// test-only, a few bytes per call.
+fn manifest_for(out: &Path) -> &'static Path {
+    let mut name = out.as_os_str().to_owned();
+    name.push(".manifest.json");
+    Box::leak(PathBuf::from(name).into_boxed_path())
 }
 
 // P1 — export-sie, inspect-sie (and the bare-path form), validate-sie: success
@@ -204,6 +215,20 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
     }
     let written = fs::read(&si).expect("written SI");
     assert_eq!(written.len(), 789);
+    // SIE-COMPLETE-01: every row accounted for; the manifest names no person.
+    for line in [
+        "cases=27\n",
+        "receipts=21\n",
+        "income_entries=6\n",
+        "excluded=23\n",
+        "silent=0\n",
+    ] {
+        assert!(stdout.contains(line), "{line}: {stdout}");
+    }
+    let manifest = fs::read_to_string(manifest_for(&si)).expect("manifest");
+    for needle in SECRETS {
+        assert!(!manifest.contains(needle), "{needle} in manifest");
+    }
 
     for args in [
         vec![OsStr::new("inspect-sie"), si.as_os_str()],

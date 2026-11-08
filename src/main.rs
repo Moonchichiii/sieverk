@@ -8,6 +8,7 @@ use chrono::NaiveDate;
 
 use sieverk::accounts::{parse_accounts, AccountData};
 use sieverk::chart::MasterdataError;
+use sieverk::completeness::completeness_report;
 use sieverk::decode_sie_bytes;
 use sieverk::engine::run_engine;
 use sieverk::export_context::VerifiedExportContext;
@@ -512,7 +513,7 @@ fn inspect_workspace(workspace: &Path) -> Result<String, String> {
 
 const EXPORT_USAGE: &str =
     "usage: sieverk export-sie --snapshot <snapshot.json> --root <generated-dir> \
---workspace <new.duckdb> --out <file.SI> --generated-on YYYY-MM-DD";
+--workspace <new.duckdb> --out <file.SI> --manifest <file.json> --generated-on YYYY-MM-DD";
 
 /// The complete, explicit input of one `export-sie` run. Identity is not an
 /// input any more (SK-SIE-BRIDGE-04): `#FNAMN`, `#ORGNR` and `#RAR 0` come only
@@ -523,6 +524,8 @@ struct ExportOptions {
     root: PathBuf,
     workspace: PathBuf,
     out: PathBuf,
+    /// SIE-COMPLETE-01: the completeness manifest, written `create_new`.
+    manifest: PathBuf,
     generated_on: NaiveDate,
 }
 
@@ -536,16 +539,18 @@ fn parse_export_options(args: &[String]) -> Result<ExportOptions, String> {
             "--root",
             "--workspace",
             "--out",
+            "--manifest",
             "--generated-on",
         ],
     )?;
-    let generated_on = NaiveDate::parse_from_str(&opts[4], "%Y-%m-%d")
+    let generated_on = NaiveDate::parse_from_str(&opts[5], "%Y-%m-%d")
         .map_err(|_| "--generated-on is not YYYY-MM-DD".to_string())?;
     Ok(ExportOptions {
         snapshot: PathBuf::from(&opts[0]),
         root: PathBuf::from(&opts[1]),
         workspace: PathBuf::from(&opts[2]),
         out: PathBuf::from(&opts[3]),
+        manifest: PathBuf::from(&opts[4]),
         generated_on,
     })
 }
@@ -560,6 +565,7 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
         Role::new(&opts.root, "<masterdata-root>"),
         Role::new(&opts.workspace, "<workspace>"),
         Role::new(&opts.out, "<out>"),
+        Role::new(&opts.manifest, "<manifest>"),
     ];
     let raw = fs::read(&opts.snapshot).map_err(|e| {
         format!(
@@ -589,27 +595,35 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
     let export = write_sie4i(&ws, &masterdata, &context, &meta).map_err(|e| {
         data_sanitized(&e.to_string(), &roles).unwrap_or_else(|| withheld("SIE writer"))
     })?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&opts.out)
-        .map_err(|e| {
-            format!(
-                "could not create the output file: {}",
-                detail(&e.to_string(), &roles)
-            )
-        })?;
-    file.write_all(&export.bytes).map_err(|e| {
-        format!(
-            "could not write the output file: {}",
-            detail(&e.to_string(), &roles)
-        )
+    // SIE-COMPLETE-01: every snapshot row is a voucher or an explicit
+    // exclusion — proven before a single output byte is written.
+    let report = completeness_report(
+        &ws,
+        &masterdata,
+        ingested.snapshot(),
+        ingested.snapshot_sha256(),
+        &export,
+    )
+    .map_err(|e| {
+        data_sanitized(&e.to_string(), &roles).unwrap_or_else(|| withheld("completeness"))
     })?;
+    let manifest = report
+        .manifest_json()
+        .map_err(|_| withheld("completeness"))?;
+    let manifest_sha256 = ws
+        .sha256_hex(&manifest)
+        .map_err(|e| workspace_error(&e, &roles))?;
+    write_outputs(
+        &[(&opts.out, &export.bytes), (&opts.manifest, &manifest)],
+        &roles,
+    )?;
     ws.close().map_err(|e| workspace_error(&e, &roles))?;
     let period = context.fiscal_period();
     Ok(format!(
         "snapshot_sha256={}\ndecision_sha256={}\nentity_type={}\nidentifier_kind={}\n\
-         fiscal_period={}..{}\nvouchers={}\naccounts={}\nbytes={}\nsi_sha256={}\n",
+         fiscal_period={}..{}\nvouchers={}\naccounts={}\nbytes={}\nsi_sha256={}\n\
+         cases={}\nreceipts={}\nincome_entries={}\nexcluded={}\nsilent={}\n\
+         manifest_sha256={}\n",
         evidence.run.provenance.snapshot_sha256,
         evidence.run.decision_sha256,
         context.entity_type().as_str(),
@@ -619,8 +633,52 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
         export.vouchers,
         export.accounts,
         export.bytes.len(),
-        export.sha256
+        export.sha256,
+        report.cases.len(),
+        report.receipts.cases,
+        report.income.cases,
+        report.excluded(),
+        report.silent(),
+        manifest_sha256
     ))
+}
+
+/// Write each output `create_new`, all or nothing: every file is created
+/// before any byte is written, and on any failure the files this call
+/// created are removed again (an existing file is never touched).
+fn write_outputs(outputs: &[(&PathBuf, &Vec<u8>)], roles: &[Role]) -> Result<(), String> {
+    let mut created: Vec<(&PathBuf, fs::File)> = Vec::with_capacity(outputs.len());
+    let cleanup = |created: &[(&PathBuf, fs::File)]| {
+        for (path, _) in created {
+            let _ = fs::remove_file(path);
+        }
+    };
+    for (path, _) in outputs {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => created.push((path, file)),
+            Err(e) => {
+                cleanup(&created);
+                return Err(format!(
+                    "could not create the output file: {}",
+                    detail(&e.to_string(), roles)
+                ));
+            }
+        }
+    }
+    for ((_, bytes), (_, file)) in outputs.iter().zip(created.iter_mut()) {
+        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            cleanup(&created);
+            return Err(format!(
+                "could not write the output file: {}",
+                detail(&e.to_string(), roles)
+            ));
+        }
+    }
+    Ok(())
 }
 
 // -- HY-SIE-01: nothing personal reaches stdout or stderr ---------------------
@@ -748,7 +806,7 @@ fn data_sanitized(text: &str, roles: &[Role]) -> Option<String> {
 // expectation built from code (`expected …`). `{{` and `}}` are literal braces.
 
 /// Every message the library builds from data, as fixed text with typed holes.
-const DATA_TEMPLATES: [&str; 255] = [
+const DATA_TEMPLATES: [&str; 275] = [
     // validator findings and parser notes (validate-sie)
     "{l} sums to {v}",
     "{l} appears more than once",
@@ -938,7 +996,7 @@ const DATA_TEMPLATES: [&str; 255] = [
     "SIE export is supported only for sole traders (entity type {c})",
     "case {v}: voucher date is outside the fiscal period",
     "Manual decision carries lines",
-    "Automatic decision without lines",
+    "{c} decision without lines (silent exclusion)",
     "program name and version are required",
     "business identifier in the export context is not NNNNNN-NNNN",
     // workspace
@@ -1010,6 +1068,27 @@ const DATA_TEMPLATES: [&str; 255] = [
     "case {v}: Manual case carries lines",
     "case {v}: lines do not balance (debit {v} credit {v})",
     "case {v}: Automatic case without lines",
+    "case {v}: {c} case without lines (silent exclusion)",
+    // SIE-COMPLETE-01: engine invariant and completeness gate
+    "case {v}: zero lines without a Manual status would be a silent exclusion; refusing",
+    "engine: {m}",
+    "completeness: workspace schema {v} holds no accounting decisions",
+    "completeness: the snapshot is not the one the verified run was built from",
+    "completeness: snapshot lists {v} more than once",
+    "completeness: {v} has no accounting case",
+    "completeness: case {v} is not a row of the snapshot",
+    "completeness: {v} is accounted for more than once",
+    "completeness: case {v}: case_seq differs from the persisted run",
+    "completeness: case {v}: source_key differs from the persisted run",
+    "completeness: case {v}: status differs from the persisted run",
+    "completeness: case {v}: lines differs from the persisted run",
+    "completeness: case {v}: findings differs from the persisted run",
+    "completeness: case counts differ between snapshot and persisted run",
+    "completeness: totals do not split into exported and excluded",
+    "completeness: case {v} is neither a voucher nor an explicit exclusion",
+    "completeness: the SIE file has {v} vouchers but {v} cases carry lines",
+    "completeness: the SIE digest does not match its bytes",
+    "completeness: amount sum overflows i64",
 ];
 
 /// serde / serde_json error texts (inside `invalid … JSON: {m}`).
@@ -2829,12 +2908,15 @@ mod tests {
         let db = TempDb::new(name);
         let out = TempDb::new(&format!("{name}-out"));
         let out_path = out.path().with_extension("SI");
+        let manifest_path = out.path().with_extension("manifest.json");
         let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&manifest_path);
         let opts = ExportOptions {
             snapshot: PathBuf::from(snapshot),
             root: PathBuf::from(SYNTHETIC_ROOT),
             workspace: db.path().to_path_buf(),
             out: out_path,
+            manifest: manifest_path,
             generated_on: NaiveDate::from_ymd_opt(2026, 9, 10).expect("date"),
         };
         (db, out, opts)
@@ -2854,6 +2936,23 @@ mod tests {
             text.contains("vouchers=4\n") && text.contains("accounts=6\n"),
             "{text}"
         );
+        // SIE-COMPLETE-01: every row accounted for, none silent.
+        for line in [
+            "cases=27\n",
+            "receipts=21\n",
+            "income_entries=6\n",
+            "excluded=23\n",
+            "silent=0\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        let manifest = std::fs::read_to_string(&opts.manifest).expect("manifest file");
+        assert!(manifest.contains("\"format\": \"sieverk-completeness/1\""));
+        assert!(
+            manifest.contains("\"ROUNDING_NOT_IMPLEMENTED\": 1"),
+            "{manifest}"
+        );
+        assert!(text.contains("manifest_sha256="), "{text}");
         assert!(text.contains("entity_type=sole_trader\n"), "{text}");
         assert!(text.contains("identifier_kind=personal_number\n"), "{text}");
         assert!(
@@ -2879,6 +2978,21 @@ mod tests {
         );
         assert!(!e.contains("sieverk-cli-tests"), "{e}");
         let _ = std::fs::remove_file(&opts.out);
+        let _ = std::fs::remove_file(&opts.manifest);
+    }
+
+    // SIE-COMPLETE-01 C9: an existing manifest path refuses the whole export
+    // and leaves no SI file behind (all or nothing; the existing file intact).
+    #[test]
+    fn cli_export_sie_existing_manifest_writes_nothing() {
+        let (_db, _out, opts) = export_opts("export-manifest-exists", TESTGARDEN_12);
+        std::fs::write(&opts.manifest, b"keep").expect("pre-existing manifest");
+        let e = export_sie(&opts).expect_err("manifest exists");
+        assert!(e.contains("could not create the output file"), "{e}");
+        assert!(!e.contains("sieverk-cli-tests"), "{e}");
+        assert!(!opts.out.exists(), "no SI file without its manifest");
+        assert_eq!(std::fs::read(&opts.manifest).expect("kept"), b"keep");
+        let _ = std::fs::remove_file(&opts.manifest);
     }
 
     #[test]
@@ -2887,6 +3001,7 @@ mod tests {
         let e = export_sie(&opts).expect_err("1.1 has no accounting identity");
         assert!(e.contains("no accounting identity"), "{e}");
         assert!(!opts.out.exists(), "no file is written on error");
+        assert!(!opts.manifest.exists(), "no manifest is written on error");
     }
 
     #[test]
@@ -2900,11 +3015,20 @@ mod tests {
             "w.duckdb",
             "--out",
             "o.SI",
+            "--manifest",
+            "o.json",
             "--generated-on",
             "2026-09-10",
         ];
         let ok = parse_export_options(&args(&base)).expect("complete");
         assert_eq!(ok.out, PathBuf::from("o.SI"));
+        assert_eq!(ok.manifest, PathBuf::from("o.json"));
+        // SIE-COMPLETE-01: the manifest is required.
+        let mut no_manifest = base.to_vec();
+        no_manifest.drain(8..10);
+        assert!(parse_export_options(&args(&no_manifest))
+            .expect_err("manifest required")
+            .contains("--manifest"));
         for removed in [
             ["--company-name", "Testgården"],
             ["--org-number", "999999-0006"],
@@ -2915,13 +3039,13 @@ mod tests {
             assert!(e.contains("unknown option"), "{e}");
         }
         let mut bad_date = base.to_vec();
-        bad_date[9] = "20260910";
+        bad_date[11] = "20260910";
         assert_eq!(
             parse_export_options(&args(&bad_date)).expect_err("date"),
             "--generated-on is not YYYY-MM-DD",
             "the rejected value is never echoed"
         );
-        let missing: Vec<&str> = base[..8].to_vec();
+        let missing: Vec<&str> = base[..10].to_vec();
         assert!(parse_export_options(&args(&missing))
             .expect_err("missing")
             .contains("--generated-on"));

@@ -511,7 +511,8 @@ fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
 fn w4b_numbering_skips_manual_and_zero_line_cases() {
     let md = masterdata();
     let db = TempDb::new("w4b");
-    // Move receipt 18 ("Grus och material", a zero-line Conditional decision)
+    // Move receipt 18 ("Grus och material", a zero-line Manual decision since
+    // SIE-COMPLETE-01: explicit ROUNDING_NOT_IMPLEMENTED, formerly Conditional)
     // to directly after receipt 1 (Bränsle). selector_position is the snapshot
     // order, so it becomes case_seq 2 — between the two exported vouchers.
     let raw = snapshot_with(|v| {
@@ -549,7 +550,7 @@ fn w4b_numbering_skips_manual_and_zero_line_cases() {
     );
     assert_eq!(shape[0].3, 0);
     assert_eq!(shape[1], (1, "Bränsle", "Conditional", 3));
-    assert_eq!(shape[2], (2, "Grus och material", "Conditional", 0));
+    assert_eq!(shape[2], (2, "Grus och material", "Manual", 0));
     assert_eq!(shape[6], (6, "Skogsvård", "Conditional", 3));
     for s in &shape[3..6] {
         assert_eq!((s.2, s.3), ("Manual", 0), "{s:?}");

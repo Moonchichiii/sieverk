@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 use sieverk::engine::{
     assess_cases, decide_cases, project_cases, AccountingDecision, CaseSource, CounterRuleRef,
-    DecisionStatus, EngineCase, EngineError, FindingCode, LineRole, Severity, SourceFacts,
+    DecisionStatus, EngineCase, EngineError, Exclusion, FindingCode, LineRole, Severity,
+    SourceFacts,
 };
 use sieverk::money::Ore;
 use sieverk::ruleset::{load_masterdata, Masterdata};
@@ -1156,7 +1157,9 @@ fn s3_1_testgarden_bransle_and_skogsvard_get_exactly_three_lines() {
         .all(|d| d.lines.is_empty()));
 }
 
-// §8.1.3 — Grus rows: rounding / supplier-credit ⇒ zero lines, no E3/E6, no VAT finding
+// §8.1.3 — Grus rows: rounding / supplier-credit ⇒ zero lines, no E3/E6, no VAT finding.
+// SIE-COMPLETE-01: the +0.30 row is no longer a silent Conditional — it is
+// Manual with the explicit ROUNDING_NOT_IMPLEMENTED reason, still no finding.
 #[test]
 fn s3_3_grus_rows_stay_fail_closed() {
     let db = TempDb::new("s3-3");
@@ -1175,18 +1178,27 @@ fn s3_3_grus_rows_stay_fail_closed() {
             !dcodes(&decisions[i])
                 .iter()
                 .any(|c| matches!(c, FindingCode::VatMismatch | FindingCode::UnresolvedVat)),
-            "rounding is a silent skip, not a VAT finding"
+            "rounding is an explicit exclusion, not a VAT finding"
         );
     }
-    // The supplier_credit row is Manual by its counter finding; the +0.30 row keeps its Conditional ceiling.
+    // The supplier_credit row is Manual by its counter finding; the +0.30 row
+    // is Manual by the explicit rounding exclusion (SIE-COMPLETE-01).
     let supplier = cases.iter().position(|c| matches!(&c.facts, SourceFacts::Receipt { payment_method: Some(p), .. } if p == "supplier_credit")).expect("row");
     assert_eq!(decisions[supplier].status, DecisionStatus::Manual);
     let plus30 = cases
         .iter()
         .position(|c| matches!(&c.facts, SourceFacts::Receipt { rounding, .. } if rounding.0 == 30))
         .expect("row");
-    assert_eq!(decisions[plus30].status, DecisionStatus::Conditional);
+    assert_eq!(decisions[plus30].status, DecisionStatus::Manual);
+    assert_eq!(
+        decisions[plus30].exclusion,
+        Some(Exclusion::RoundingNotImplemented)
+    );
     assert!(decisions[plus30].lines.is_empty());
+    assert_eq!(
+        decisions[supplier].exclusion,
+        Some(Exclusion::BlockingFindings)
+    );
 }
 
 // §8.1.4 — vat_registered != yes ⇒ Manual, zero lines, no invented branch, no VAT finding
@@ -1905,4 +1917,196 @@ fn i13_no_income_case_is_ever_silent() {
         }
     }
     assert_eq!(checked, 44);
+}
+
+// ---------------------------------------------------------------------------
+// SIE-COMPLETE-01 — every decision is lines XOR one explicit exclusion
+// ---------------------------------------------------------------------------
+
+/// The SIE-COMPLETE-01 invariant on one decision.
+fn assert_lines_or_explicit_exclusion(d: &AccountingDecision) {
+    if d.lines.is_empty() {
+        assert_eq!(
+            d.status,
+            DecisionStatus::Manual,
+            "case {}: zero lines must be Manual",
+            d.case_seq
+        );
+        assert!(
+            d.exclusion.is_some(),
+            "case {}: zero lines without a reason",
+            d.case_seq
+        );
+        if d.exclusion == Some(Exclusion::BlockingFindings) {
+            assert!(d.findings.iter().any(|f| f.severity == Severity::Blocking));
+        }
+    } else {
+        assert_ne!(d.status, DecisionStatus::Manual, "case {}", d.case_seq);
+        assert_eq!(d.exclusion, None, "case {}: lines and a reason", d.case_seq);
+    }
+}
+
+// C1 — Testgården: no silent case; exact reason breakdown
+#[test]
+fn c1_testgarden_every_case_is_lines_or_explicit_exclusion() {
+    for (name, fixture) in [
+        ("c1-11", TESTGARDEN),
+        ("c1-12", "fixtures/snapshots/testgarden-2026-1.2.json"),
+    ] {
+        let db = TempDb::new(name);
+        let ws = workspace_from(&db, fixture);
+        let (cases, decisions) = decisions_for(&ws, &masterdata());
+        assert_eq!(cases.len(), 27, "{name}");
+        decisions
+            .iter()
+            .for_each(assert_lines_or_explicit_exclusion);
+        let with_lines = decisions.iter().filter(|d| !d.lines.is_empty()).count();
+        let reason = |r| decisions.iter().filter(|d| d.exclusion == Some(r)).count();
+        assert_eq!(with_lines, 4, "{name}");
+        assert_eq!(reason(Exclusion::BlockingFindings), 22, "{name}");
+        assert_eq!(reason(Exclusion::RoundingNotImplemented), 1, "{name}");
+        assert_eq!(reason(Exclusion::ManualAutomation), 0, "{name}");
+        assert_eq!(reason(Exclusion::EntityNotVatRegistered), 0, "{name}");
+        assert_eq!(reason(Exclusion::VatBranchNotImplemented), 0, "{name}");
+    }
+}
+
+// C2 — non-zero rounding never invents an account: Manual, no lines, no
+// finding added beyond the assessment's own, reason ROUNDING_NOT_IMPLEMENTED
+#[test]
+fn c2_rounding_is_explicit_manual_and_invents_no_account() {
+    let db = TempDb::new("c2");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+    for rounding in [1, -1, 30, -49, 50] {
+        let c = bransle_with(&cases, 500_000, 125_000, rounding);
+        let a = assess_cases(std::slice::from_ref(&c), &entity, &md).expect("a");
+        let d = decide_one(&c, &entity, &md).expect("decide");
+        assert_eq!(d.status, DecisionStatus::Manual, "{rounding}");
+        assert!(
+            d.lines.is_empty(),
+            "{rounding}: no rounding line is invented"
+        );
+        assert_eq!(d.exclusion, Some(Exclusion::RoundingNotImplemented));
+        assert_eq!(d.findings, a[0].findings, "{rounding}: no finding added");
+    }
+    // Zero rounding: the positive branch is untouched.
+    let d = decide_one(&bransle_with(&cases, 500_000, 125_000, 0), &entity, &md).expect("d");
+    assert_eq!((d.lines.len(), d.exclusion), (3, None));
+}
+
+// C3 — non-positive receipt amounts are UNRESOLVED_VAT (credit notes), never silent
+#[test]
+fn c3_non_positive_receipt_is_blocking_never_silent() {
+    let db = TempDb::new("c3");
+    let ws = testgarden(&db);
+    let entity = ws.read_entity().expect("e");
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+    for (net, vat) in [(-500_000, -125_000), (0, 0), (-500_000, 0)] {
+        let d = decide_one(&bransle_with(&cases, net, vat, 0), &entity, &md).expect("decide");
+        assert_eq!(d.status, DecisionStatus::Manual, "{net}/{vat}");
+        assert!(d.lines.is_empty());
+        assert_eq!(d.exclusion, Some(Exclusion::BlockingFindings));
+        let f = d
+            .findings
+            .iter()
+            .find(|f| f.code == FindingCode::UnresolvedVat)
+            .expect("UNRESOLVED_VAT");
+        assert_eq!(f.severity, Severity::Blocking);
+        assert_eq!(
+            f.message,
+            "receipt amounts are not positive; credit notes are not implemented"
+        );
+    }
+}
+
+// C4 — the not-implemented branches each carry their own reason
+#[test]
+fn c4_not_implemented_branches_have_distinct_reasons() {
+    let db = TempDb::new("c4");
+    let ws = testgarden(&db);
+    let cases = project_cases(&ws).expect("p");
+    let bransle = cases
+        .iter()
+        .position(|c| c.subject.as_deref() == Some("Bränsle"))
+        .expect("row");
+    let one = &cases[bransle];
+    // Entity gate.
+    let mut entity = ws.read_entity().expect("e");
+    entity.vat_registered = Some("no".to_string());
+    let d = decide_one(one, &entity, &masterdata()).expect("d");
+    assert_eq!(d.exclusion, Some(Exclusion::EntityNotVatRegistered));
+    // VAT branch outside the implemented one.
+    let entity = ws.read_entity().expect("e");
+    let mut md = masterdata();
+    let vat_rule = md
+        .ruleset
+        .cases
+        .iter()
+        .find(|c| c.case_id == "bransle.default")
+        .and_then(|c| c.vat_rule.clone())
+        .expect("vat rule id");
+    md.vat
+        .rules
+        .iter_mut()
+        .find(|r| r.id == vat_rule)
+        .expect("rule")
+        .deductibility = "ingen".to_string();
+    let d = decide_one(one, &entity, &md).expect("d");
+    assert_eq!(d.exclusion, Some(Exclusion::VatBranchNotImplemented));
+    // A Manual counter automation without any Blocking finding.
+    let mut md = masterdata();
+    for r in md
+        .counter
+        .rows
+        .iter_mut()
+        .filter(|r| r.key == "company_account")
+    {
+        r.automation = "Manual".to_string();
+        r.question = Some("Bekräfta motkonto".to_string());
+    }
+    let d = decide_one(one, &entity, &md).expect("d");
+    assert!(d.findings.iter().all(|f| f.severity != Severity::Blocking));
+    assert_eq!(d.exclusion, Some(Exclusion::ManualAutomation));
+    assert_lines_or_explicit_exclusion(&d);
+}
+
+// C5 — exhaustive receipt grid: no receipt variant is ever silent
+#[test]
+fn c5_no_receipt_variant_is_ever_silent() {
+    let db = TempDb::new("c5");
+    let ws = testgarden(&db);
+    let md = masterdata();
+    let cases = project_cases(&ws).expect("p");
+    let mut entities = vec![ws.read_entity().expect("e")];
+    for vr in ["no", "unknown"] {
+        let mut e = ws.read_entity().expect("e");
+        e.vat_registered = Some(vr.to_string());
+        entities.push(e);
+    }
+    let money = [
+        (500_000, 125_000, 0),
+        (500_000, 125_000, 30),
+        (500_000, 125_001, 0),
+        (500_000, 0, 0),
+        (-500_000, -125_000, 0),
+        (2, 0, 0),
+    ];
+    let mut checked = 0;
+    for entity in &entities {
+        // Every Testgården receipt as-is, and the Bränsle money grid.
+        for c in cases.iter().filter(|c| c.source == CaseSource::Receipt) {
+            assert_lines_or_explicit_exclusion(&decide_one(c, entity, &md).expect("d"));
+            checked += 1;
+        }
+        for (net, vat, rounding) in money {
+            let c = bransle_with(&cases, net, vat, rounding);
+            assert_lines_or_explicit_exclusion(&decide_one(&c, entity, &md).expect("d"));
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 3 * (21 + 6));
 }

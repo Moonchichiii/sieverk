@@ -2480,6 +2480,13 @@ fn check_run_rows(
                     debit_sum[ci], credit_sum[ci]
                 )));
             }
+        } else if schema == WORKSPACE_SCHEMA_DECISIONS && c.status != "Manual" {
+            // SIE-COMPLETE-01: in a decision run every zero-line case is
+            // Manual; anything else would be a silent exclusion.
+            return Err(corrupt(format!(
+                "case {ci}: {} case without lines (silent exclusion)",
+                c.status
+            )));
         } else if c.status == "Automatic" {
             return Err(corrupt(format!("case {ci}: Automatic case without lines")));
         }

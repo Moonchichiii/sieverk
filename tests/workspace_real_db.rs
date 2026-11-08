@@ -2423,6 +2423,19 @@ fn t3_persist_run_line_preflight() {
             "Automatic without lines",
             m(move |c, _| c[0].status = "Automatic".to_string()),
         ),
+        // SIE-COMPLETE-01: a schema-3 run never persists a silent exclusion —
+        // the +0.30 rounding receipt as a zero-line Conditional (its pre-
+        // SIE-COMPLETE-01 shape) is refused.
+        (
+            "rounding receipt Conditional without lines",
+            m(move |c, _| {
+                let grus = c
+                    .iter()
+                    .position(|x| x.rounding == Some(Ore(30)))
+                    .expect("rounding receipt");
+                c[grus].status = "Conditional".to_string();
+            }),
+        ),
         (
             "lines on a Manual status",
             m(move |c, _| c[bransle as usize].status = "Manual".to_string()),
@@ -2512,6 +2525,36 @@ fn i10_i11_schema3_source_role_side_and_income_key_corruptions_are_corrupt() {
         let e = ws.verify_run().expect_err(name);
         assert!(
             matches!(&e, WorkspaceError::Corrupt(m) if m.contains(reason)),
+            "{name}: {e}"
+        );
+    }
+}
+
+// C6 — SIE-COMPLETE-01: a schema-3 run whose zero-line case is not Manual is
+// Corrupt (silent exclusion): the rounding receipt promoted to Conditional,
+// and a voucher whose lines were dropped.
+#[test]
+fn c6_schema3_non_manual_zero_line_case_is_corrupt() {
+    let grus = "(SELECT case_seq FROM accounting_cases WHERE rounding_ore = 30)";
+    let bra = "(SELECT min(case_seq) FROM accounting_cases WHERE subject = 'Bränsle')";
+    let scenarios = [
+        (
+            "c6-rounding-conditional",
+            format!("UPDATE accounting_cases SET status = 'Conditional' WHERE case_seq = {grus}"),
+        ),
+        (
+            "c6-voucher-lines-dropped",
+            format!("DELETE FROM decision_lines WHERE case_seq = {bra}"),
+        ),
+    ];
+    for (name, statement) in scenarios {
+        let db = TempDb::new(name);
+        let (ws, _) = run_testgarden(&db);
+        ws.verify_run().expect("clean run verifies");
+        sql(&ws, &statement);
+        let e = ws.verify_run().expect_err(name);
+        assert!(
+            matches!(&e, WorkspaceError::Corrupt(m) if m.contains("Conditional case without lines (silent exclusion)")),
             "{name}: {e}"
         );
     }
