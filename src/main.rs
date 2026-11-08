@@ -2818,10 +2818,12 @@ mod tests {
 
     const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
     const TESTGARDEN_12: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
-    /// vNext canonical Testgården (BRIDGE-04, CASE B — blank series,
-    /// writer-assigned numbers 1..N): locked from the real writer bytes.
-    const TESTGARDEN_VNEXT_SHA256: &str =
-        "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
+    /// Testgården export since SIE-INCOME-01 (CASE B + two paid income
+    /// vouchers): locked from the real writer bytes. The Capego-accepted CASE B
+    /// file (489 bytes, 3c225ff8…) is proven as its reduction in
+    /// tests/sie_writer.rs (W1c).
+    const TESTGARDEN_INCOME01_SHA256: &str =
+        "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
 
     fn export_opts(name: &str, snapshot: &str) -> (TempDb, TempDb, ExportOptions) {
         let db = TempDb::new(name);
@@ -2843,13 +2845,13 @@ mod tests {
         let (_db, _out, opts) = export_opts("export", TESTGARDEN_12);
         let text = export_sie(&opts).expect("export");
         let bytes = std::fs::read(&opts.out).expect("out file");
-        assert_eq!(bytes.len(), 489, "{text}");
+        assert_eq!(bytes.len(), 789, "{text}");
         assert!(
-            text.contains(&format!("si_sha256={TESTGARDEN_VNEXT_SHA256}\n")),
+            text.contains(&format!("si_sha256={TESTGARDEN_INCOME01_SHA256}\n")),
             "{text}"
         );
         assert!(
-            text.contains("vouchers=2\n") && text.contains("accounts=4\n"),
+            text.contains("vouchers=4\n") && text.contains("accounts=6\n"),
             "{text}"
         );
         assert!(text.contains("entity_type=sole_trader\n"), "{text}");

@@ -16,8 +16,10 @@ const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
 const TESTGARDEN_11: &str = "fixtures/snapshots/testgarden-2026-1.1.json";
 const TESTGARDEN_12: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
 const MINIMAL_11: &str = "fixtures/snapshots/minimal-1.1.json";
-/// CASE B canonical Testgården (BRIDGE-04, d1da159).
-const CASE_B_SHA256: &str = "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
+/// Testgården export since SIE-INCOME-01 (CASE B + two income vouchers; the
+/// CASE B file itself stays evidence, see tests/sie_writer.rs W1c).
+const TESTGARDEN_SI_SHA256: &str =
+    "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
 
 /// Never printed, in any command, on any outcome.
 const SECRETS: [&str; 12] = [
@@ -187,13 +189,13 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
 
     let stdout = ok(&run(export_args(&snap, &md, &ws, &si), cwd), &sb);
     assert!(
-        stdout.contains(&format!("si_sha256={CASE_B_SHA256}\n")),
+        stdout.contains(&format!("si_sha256={TESTGARDEN_SI_SHA256}\n")),
         "{stdout}"
     );
     for line in [
-        "vouchers=2\n",
-        "accounts=4\n",
-        "bytes=489\n",
+        "vouchers=4\n",
+        "accounts=6\n",
+        "bytes=789\n",
         "entity_type=sole_trader\n",
         "identifier_kind=personal_number\n",
         "fiscal_period=2026-01-01..2026-12-31\n",
@@ -201,7 +203,7 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
         assert!(stdout.contains(line), "{line}: {stdout}");
     }
     let written = fs::read(&si).expect("written SI");
-    assert_eq!(written.len(), 489);
+    assert_eq!(written.len(), 789);
 
     for args in [
         vec![OsStr::new("inspect-sie"), si.as_os_str()],
@@ -210,8 +212,8 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
         let stdout = ok(&run(args, cwd), &sb);
         assert!(stdout.contains("Company:     [REDACTED]\n"), "{stdout}");
         assert!(stdout.contains("Org number:  [REDACTED]\n"), "{stdout}");
-        assert!(stdout.contains("Vouchers:    2\n"), "{stdout}");
-        assert!(stdout.contains("Ledger rows: 6\n"), "{stdout}");
+        assert!(stdout.contains("Vouchers:    4\n"), "{stdout}");
+        assert!(stdout.contains("Ledger rows: 12\n"), "{stdout}");
     }
     let stdout = ok(&run([OsStr::new("validate-sie"), si.as_os_str()], cwd), &sb);
     assert!(stdout.contains("Status:      "), "{stdout}");
@@ -593,7 +595,7 @@ fn f5_relative_paths_succeed_and_fail_without_leaks() {
     );
     let stdout = ok(&run(export_args(&snap, &md, &ws, &out), &sb.dir), &sb);
     assert!(
-        stdout.contains(&format!("si_sha256={CASE_B_SHA256}\n")),
+        stdout.contains(&format!("si_sha256={TESTGARDEN_SI_SHA256}\n")),
         "{stdout}"
     );
 

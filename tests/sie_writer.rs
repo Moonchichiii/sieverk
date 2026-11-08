@@ -9,6 +9,12 @@
 //! evidence and are proven as exact reductions of the golden: the pre-D3
 //! BRIDGE-04 file (487 bytes, b977601f…dd0b, blank series and number) and the
 //! historical Slice-1 file.
+//!
+//! SIE-INCOME-01: the live Testgården export now also carries the two paid
+//! leveransvirke incomes (vouchers 3 and 4, accounts 2610 and 3420). That
+//! export is the new golden (`INCOME01_*`). The Capego-accepted CASE B file
+//! (489 bytes, `3c225ff8…`) is unchanged evidence and is proven (W1c) to be
+//! exactly the new golden minus the income vouchers and their accounts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +35,17 @@ const HISTORICAL_SHA256: &str = "3fc89f8b504f883d0a4444e11e5389c25b99f201b0bfdaf
 const HISTORICAL_BYTES: usize = 441;
 const VNEXT_SHA256: &str = "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
 const VNEXT_BYTES: usize = 489;
+/// SIE-INCOME-01 golden: the live Testgården export with income vouchers.
+/// Hash locked from the real writer bytes; never edited to make a test green.
+const INCOME01_SHA256: &str = "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
+const INCOME01_BYTES: usize = 789;
+/// The two income vouchers and the two accounts they add, in CP437 bytes.
+const INCOME_KONTO_2610: &[u8] = b"#KONTO 2610 \"Utg\x86ende moms\"\r\n";
+const INCOME_KONTO_3420: &[u8] = b"#KONTO 3420 \"Leveransvirke\"\r\n";
+const INCOME_VER_3: &str = "#VER \"\" \"3\" 20260420 \"leveransvirke\"\r\n{\r\n\
+#TRANS 1930 {} 120000.00\r\n#TRANS 3420 {} -96000.00\r\n#TRANS 2610 {} -24000.00\r\n}\r\n";
+const INCOME_VER_4: &str = "#VER \"\" \"4\" 20260708 \"leveransvirke\"\r\n{\r\n\
+#TRANS 1930 {} 47500.00\r\n#TRANS 3420 {} -38000.00\r\n#TRANS 2610 {} -9500.00\r\n}\r\n";
 /// BRIDGE-04 pre-D3 compatibility vector (blank series and number): evidence.
 const PRE_D3_SHA256: &str = "b977601f45b5a5495dead24849393f19626fa17d0d9c6b7f50d64d33e418dd0b";
 const PRE_D3_BYTES: usize = 487;
@@ -105,6 +122,38 @@ fn vnext_text() -> String {
         .replacen(VER_BLANK, VER_NUM_2, 1)
 }
 
+/// SIE-INCOME-01 golden text: the CASE B text plus the two income accounts
+/// (in account order) and the two income vouchers (in case_seq order).
+fn income01_text() -> String {
+    vnext_text()
+        .replacen(
+            "#KONTO 2640",
+            "#KONTO 2610 \"Utgående moms\"\r\n#KONTO 2640",
+            1,
+        )
+        .replacen(
+            "#KONTO 4470",
+            "#KONTO 3420 \"Leveransvirke\"\r\n#KONTO 4470",
+            1,
+        )
+        + INCOME_VER_3
+        + INCOME_VER_4
+}
+
+/// W1c reduction: remove exactly the income vouchers and their accounts.
+fn reduce_income(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for needle in [
+        INCOME_KONTO_2610,
+        INCOME_KONTO_3420,
+        INCOME_VER_3.as_bytes(),
+        INCOME_VER_4.as_bytes(),
+    ] {
+        replace_once(&mut out, needle, b"");
+    }
+    out
+}
+
 /// Replace exactly one occurrence of `from` with `to` in raw bytes.
 fn replace_once(bytes: &mut Vec<u8>, from: &[u8], to: &[u8]) {
     let at = bytes
@@ -166,13 +215,13 @@ fn w1_testgarden_export_matches_the_vnext_canonical_exactly() {
     // If these fail: STOP and diff — never adjust content to match the hash.
     assert_eq!(
         text,
-        vnext_text(),
-        "decoded text differs from the vNext canonical"
+        income01_text(),
+        "decoded text differs from the SIE-INCOME-01 golden"
     );
-    assert_eq!(out.bytes.len(), VNEXT_BYTES);
-    assert_eq!(out.sha256, VNEXT_SHA256);
-    assert_eq!(out.vouchers, 2);
-    assert_eq!(out.accounts, 4);
+    assert_eq!(out.bytes.len(), INCOME01_BYTES);
+    assert_eq!(out.sha256, INCOME01_SHA256);
+    assert_eq!(out.vouchers, 4);
+    assert_eq!(out.accounts, 6);
     // CRLF on every line including the last; no bare LF anywhere.
     assert!(out.bytes.ends_with(b"\r\n"));
     for (i, b) in out.bytes.iter().enumerate() {
@@ -196,7 +245,9 @@ fn w1_testgarden_export_matches_the_vnext_canonical_exactly() {
             "#KONTO 1930 \"Bank\"",
         ]
     );
-    for absent in ["#KPTYP", "#KSUMMA", "#IB", "#UB", "#RES", "receipt:", "+"] {
+    for absent in [
+        "#KPTYP", "#KSUMMA", "#IB", "#UB", "#RES", "receipt:", "income:", "+",
+    ] {
         assert!(!text.contains(absent), "{absent} must not appear");
     }
     // Swedish characters as CP437 bytes: å=0x86 ä=0x84.
@@ -218,14 +269,16 @@ fn w1b_vnext_reduces_to_the_pre_d3_and_historical_files() {
     let md = masterdata();
     let (ws, ctx) = run_workspace(&db, &md);
     let out = export(&ws, &md, &ctx);
-    let text = decode_sie_bytes(out.bytes.clone());
+    // SIE-INCOME-01: first reduce the live export to CASE B (W1c), then on.
+    let case_b = reduce_income(&out.bytes);
+    let text = decode_sie_bytes(case_b.clone());
     assert_eq!(text.matches(ORGNR_LINE).count(), 1);
     assert_eq!(text.matches(RAR_LINE).count(), 1);
     assert_eq!(text.matches(VER_NUM_1).count(), 1);
     assert_eq!(text.matches(VER_NUM_2).count(), 1);
     assert_eq!(text.matches(VER_BLANK).count(), 0);
     // 1. Numbers 1 and 2 -> blank gives exactly the pre-D3 BRIDGE-04 vector.
-    let mut bytes = out.bytes.clone();
+    let mut bytes = case_b;
     for numbered in [VER_NUM_1, VER_NUM_2] {
         replace_once(&mut bytes, numbered.as_bytes(), VER_BLANK.as_bytes());
     }
@@ -238,6 +291,25 @@ fn w1b_vnext_reduces_to_the_pre_d3_and_historical_files() {
     assert_eq!(bytes.len(), HISTORICAL_BYTES);
     assert_eq!(ws.sha256_hex(&bytes).expect("sha"), HISTORICAL_SHA256);
     assert_eq!(decode_sie_bytes(bytes), HISTORICAL_TEXT);
+}
+
+// W1c — SIE-INCOME-01: the new golden minus the income vouchers and their
+// accounts is byte-identical to the Capego-accepted CASE B file (489 bytes)
+#[test]
+fn w1c_income_golden_reduces_exactly_to_the_capego_accepted_case_b_file() {
+    let db = TempDb::new("w1c");
+    let md = masterdata();
+    let (ws, ctx) = run_workspace(&db, &md);
+    let out = export(&ws, &md, &ctx);
+    assert_eq!(out.sha256, INCOME01_SHA256);
+    let case_b = reduce_income(&out.bytes);
+    assert_eq!(case_b.len(), VNEXT_BYTES);
+    assert_eq!(ws.sha256_hex(&case_b).expect("sha"), VNEXT_SHA256);
+    assert_eq!(decode_sie_bytes(case_b), vnext_text());
+    // The receipt vouchers keep their numbers: the income vouchers come after
+    // them in case_seq order, so #VER 1 and #VER 2 are untouched.
+    let text = decode_sie_bytes(out.bytes);
+    assert!(text.find(VER_NUM_2).expect("ver 2") < text.find(INCOME_VER_3).expect("ver 3"));
 }
 
 // W2 — deterministic across independent workspaces
@@ -290,14 +362,43 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
             .collect::<Vec<_>>(),
         vec![
             ("1930", Some("Bank")),
+            ("2610", Some("Utgående moms")),
             ("2640", Some("Ingående moms")),
+            ("3420", Some("Leveransvirke")),
             ("4470", Some("Omkostnader skogen")),
             ("5360", Some("Drivmedel och oljor")),
         ]
     );
     assert!(a.balances.is_empty(), "no #IB/#UB/#RES in a 4I");
     let v = vouchers::parse_vouchers(&text);
-    assert_eq!(v.vouchers.len(), 2);
+    assert_eq!(v.vouchers.len(), 4);
+    // I12 — SIE-INCOME-01: the income vouchers parse back exactly.
+    let third = &v.vouchers[2];
+    assert_eq!(
+        (
+            third.series.as_str(),
+            third.number.as_str(),
+            third.date.as_str()
+        ),
+        ("", "3", "20260420")
+    );
+    assert_eq!(third.text.as_deref(), Some("leveransvirke"));
+    assert_eq!(
+        third
+            .rows
+            .iter()
+            .map(|r| (r.account.as_str(), r.amount))
+            .collect::<Vec<_>>(),
+        vec![
+            ("1930", Ore(12_000_000)),
+            ("3420", Ore(-9_600_000)),
+            ("2610", Ore(-2_400_000))
+        ]
+    );
+    assert_eq!(
+        (v.vouchers[3].number.as_str(), v.vouchers[3].date.as_str()),
+        ("4", "20260708")
+    );
     let first = &v.vouchers[0];
     assert_eq!(
         (
@@ -374,8 +475,8 @@ fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
         .collect();
     assert_eq!(
         line_bearing.len(),
-        2,
-        "exactly the two proven decisions carry lines"
+        4,
+        "exactly the two proven receipts and the two paid incomes carry lines"
     );
     assert!(cases
         .iter()
@@ -383,14 +484,24 @@ fn w4_only_line_bearing_non_manual_decisions_and_used_accounts() {
         .all(|c| !lines.iter().any(|l| l.case_seq == c.case_seq)));
     let out = export(&ws, &md, &ctx);
     let text = decode_sie_bytes(out.bytes);
-    assert_eq!(text.matches("#VER ").count(), 2);
-    assert_eq!(text.matches("#KONTO ").count(), 4);
+    assert_eq!(text.matches("#VER ").count(), 4);
+    assert_eq!(text.matches("#KONTO ").count(), 6);
     // Accounts used by no exported line are absent even though the chart declares them.
     assert!(md.chart.account("2013").is_some());
     assert!(!text.contains("#KONTO 2013"));
     // Grusgropen (rounding / supplier credit) and every Manual case are absent.
     assert!(!text.contains("Grus och material"));
     assert!(!text.contains("Annat"));
+    // Manual incomes (unmapped types, the unpaid efterlikvid) are absent.
+    for absent in [
+        "efterlikvid",
+        "hunting_lease",
+        "avverkningsratt",
+        "grot",
+        "#KONTO 3493",
+    ] {
+        assert!(!text.contains(absent), "{absent}");
+    }
 }
 
 // W4b — numbering consumes ordinals only for exported vouchers: a Manual case
@@ -451,12 +562,17 @@ fn w4b_numbering_skips_manual_and_zero_line_cases() {
             .iter()
             .map(|x| (x.series.as_str(), x.number.as_str(), x.date.as_str()))
             .collect::<Vec<_>>(),
-        vec![("", "1", "20260820"), ("", "2", "20260602")]
+        vec![
+            ("", "1", "20260820"),
+            ("", "2", "20260602"),
+            ("", "3", "20260420"),
+            ("", "4", "20260708")
+        ]
     );
     assert!(!text.contains("Grus och material"));
     // Same exported content, same numbers, same bytes as the canonical file.
-    assert_eq!(text, vnext_text());
-    assert_eq!(out.sha256, VNEXT_SHA256);
+    assert_eq!(text, income01_text());
+    assert_eq!(out.sha256, INCOME01_SHA256);
 }
 
 // W5 — schema 1 and schema 2 cannot export; corrupt schema 3 cannot export
@@ -704,7 +820,7 @@ fn w8_disk_roundtrip_and_no_json_reopen() {
     fs::write(&path, &out.bytes).expect("write");
     let back = fs::read(&path).expect("read back");
     assert_eq!(back, out.bytes);
-    assert_eq!(ws.sha256_hex(&back).expect("sha"), VNEXT_SHA256);
+    assert_eq!(ws.sha256_hex(&back).expect("sha"), INCOME01_SHA256);
     let _ = fs::remove_file(&path);
 }
 
@@ -789,8 +905,8 @@ fn w13_voucher_series_setting_does_not_affect_the_export() {
         ("", "w13-empty"),
     ] {
         let out = export_with_series(series, tag).expect(series);
-        assert_eq!(out.sha256, VNEXT_SHA256, "{series:?}");
-        assert_eq!(decode_sie_bytes(out.bytes), vnext_text(), "{series:?}");
+        assert_eq!(out.sha256, INCOME01_SHA256, "{series:?}");
+        assert_eq!(decode_sie_bytes(out.bytes), income01_text(), "{series:?}");
     }
     // A missing series (NULL in the verified workspace) changes nothing either;
     // entity_context is outside the decision digest, so verify_run still passes.
@@ -799,7 +915,7 @@ fn w13_voucher_series_setting_does_not_affect_the_export() {
     let (ws, ctx) = run_workspace(&db, &md);
     sql(&ws, "UPDATE entity_context SET sie_series = NULL");
     let out = write_sie4i(&ws, &md, &ctx, &meta()).expect("NULL series exports");
-    assert_eq!(out.sha256, VNEXT_SHA256);
+    assert_eq!(out.sha256, INCOME01_SHA256);
 }
 
 #[test]
@@ -810,8 +926,8 @@ fn w13b_blank_series_and_contiguous_numbers_on_every_voucher() {
     let out = export(&ws, &md, &ctx);
     let text = decode_sie_bytes(out.bytes.clone());
     let v = vouchers::parse_vouchers(&text);
-    assert_eq!(v.vouchers.len(), 2);
-    assert_eq!(v.vouchers.iter().map(|x| x.rows.len()).sum::<usize>(), 6);
+    assert_eq!(v.vouchers.len(), 4);
+    assert_eq!(v.vouchers.iter().map(|x| x.rows.len()).sum::<usize>(), 12);
     for (i, vo) in v.vouchers.iter().enumerate() {
         let expected = (i + 1).to_string();
         assert_eq!(
@@ -819,8 +935,8 @@ fn w13b_blank_series_and_contiguous_numbers_on_every_voucher() {
             ("", expected.as_str())
         );
     }
-    assert_eq!(text.matches("#VER ").count(), 2);
-    assert_eq!(text.matches("#TRANS ").count(), 6);
+    assert_eq!(text.matches("#VER ").count(), 4);
+    assert_eq!(text.matches("#TRANS ").count(), 12);
     assert_eq!(text.matches(VER_BLANK).count(), 0);
-    assert_eq!(out.sha256, VNEXT_SHA256);
+    assert_eq!(out.sha256, INCOME01_SHA256);
 }
