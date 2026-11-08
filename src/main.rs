@@ -567,6 +567,10 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
         Role::new(&opts.out, "<out>"),
         Role::new(&opts.manifest, "<manifest>"),
     ];
+    // SIE-OUT-01: everything this run writes lands in private directories.
+    require_private_dir(&opts.workspace, "<workspace>")?;
+    require_private_dir(&opts.out, "<out>")?;
+    require_private_dir(&opts.manifest, "<manifest>")?;
     let raw = fs::read(&opts.snapshot).map_err(|e| {
         format!(
             "could not read the snapshot file: {}",
@@ -623,7 +627,7 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
         "snapshot_sha256={}\ndecision_sha256={}\nentity_type={}\nidentifier_kind={}\n\
          fiscal_period={}..{}\nvouchers={}\naccounts={}\nbytes={}\nsi_sha256={}\n\
          cases={}\nreceipts={}\nincome_entries={}\nexcluded={}\nsilent={}\n\
-         manifest_sha256={}\n",
+         coverage={}\nmanifest_sha256={}\n",
         evidence.run.provenance.snapshot_sha256,
         evidence.run.decision_sha256,
         context.entity_type().as_str(),
@@ -639,9 +643,49 @@ fn export_sie(opts: &ExportOptions) -> Result<String, String> {
         report.income.cases,
         report.excluded(),
         report.silent(),
+        report.coverage().as_str(),
         manifest_sha256
     ))
 }
+
+/// SIE-OUT-01: on Unix the directory that receives `path` must grant nothing
+/// to group or others (e.g. 0700), because the workspace, the SIE file and the
+/// manifest hold bookkeeping data and DuckDB creates its own side files there.
+/// On Windows the per-user profile/TEMP ACLs apply; nothing is checked here.
+#[cfg(unix)]
+fn require_private_dir(path: &Path, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let meta =
+        fs::metadata(dir).map_err(|_| format!("the directory of {label} cannot be inspected"))?;
+    if !meta.is_dir() {
+        return Err(format!("the directory of {label} is not a directory"));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "the directory of {label} is accessible to other users; use a private (0700) directory"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_private_dir(_path: &Path, _label: &str) -> Result<(), String> {
+    Ok(())
+}
+
+/// SIE-OUT-01: output files are created owner-only (0600) on Unix.
+#[cfg(unix)]
+fn owner_only(opts: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    opts.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn owner_only(_opts: &mut fs::OpenOptions) {}
 
 /// Write each output `create_new`, all or nothing: every file is created
 /// before any byte is written, and on any failure the files this call
@@ -654,11 +698,10 @@ fn write_outputs(outputs: &[(&PathBuf, &Vec<u8>)], roles: &[Role]) -> Result<(),
         }
     };
     for (path, _) in outputs {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        owner_only(&mut options);
+        match options.open(path) {
             Ok(file) => created.push((path, file)),
             Err(e) => {
                 cleanup(&created);
@@ -2682,6 +2725,7 @@ mod tests {
         fn new(name: &str) -> Self {
             let dir = std::env::temp_dir().join("sieverk-cli-tests");
             std::fs::create_dir_all(&dir).expect("temp dir");
+            private_dir(&dir);
             let path = dir.join(format!("{}-{name}.duckdb", std::process::id()));
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(path.with_extension("duckdb.wal"));
@@ -2893,6 +2937,18 @@ mod tests {
         assert!(e.contains("missing required option --workspace"), "{e}");
     }
 
+    /// SIE-OUT-01: export-sie writes only into private directories (Unix 0700).
+    fn private_dir(dir: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod 0700");
+        }
+        #[cfg(not(unix))]
+        let _ = dir;
+    }
+
     // -- SV-04 Slice 1 + SK-SIE-BRIDGE-04: export-sie -----------------------------
 
     const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
@@ -2953,6 +3009,18 @@ mod tests {
             "{manifest}"
         );
         assert!(text.contains("manifest_sha256="), "{text}");
+        // SIE-OUT-01: 23 exclusions ⇒ partial, in stdout and in the manifest.
+        assert!(text.contains("coverage=partial\n"), "{text}");
+        assert!(manifest.contains("\"coverage\": \"partial\""), "{manifest}");
+        // SIE-OUT-01: both outputs are owner-only on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [&opts.out, &opts.manifest] {
+                let mode = std::fs::metadata(p).expect("meta").permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+            }
+        }
         assert!(text.contains("entity_type=sole_trader\n"), "{text}");
         assert!(text.contains("identifier_kind=personal_number\n"), "{text}");
         assert!(
@@ -2993,6 +3061,62 @@ mod tests {
         assert!(!opts.out.exists(), "no SI file without its manifest");
         assert_eq!(std::fs::read(&opts.manifest).expect("kept"), b"keep");
         let _ = std::fs::remove_file(&opts.manifest);
+    }
+
+    // SIE-OUT-01 O1: a directory that group/others can enter is refused before
+    // anything is read or created; the message names the role, never the path.
+    #[cfg(unix)]
+    #[test]
+    fn cli_export_sie_refuses_a_shared_output_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_db, _out, mut opts) = export_opts("export-shared-dir", TESTGARDEN_12);
+        let shared = std::env::temp_dir().join(format!(
+            "sieverk-cli-shared-{}-9001019802",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&shared);
+        std::fs::create_dir_all(&shared).expect("dir");
+        for (mode, role) in [
+            (0o755, "<manifest>"),
+            (0o750, "<manifest>"),
+            (0o701, "<manifest>"),
+        ] {
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode))
+                .expect("chmod");
+            opts.manifest = shared.join("m.json");
+            let e = export_sie(&opts).expect_err("shared dir");
+            assert_eq!(
+                e,
+                format!("the directory of {role} is accessible to other users; use a private (0700) directory"),
+                "{mode:o}"
+            );
+            assert!(
+                !opts.out.exists() && !opts.workspace.exists(),
+                "{mode:o}: nothing created"
+            );
+        }
+        // The same directory made private is accepted.
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        export_sie(&opts).expect("private dir");
+        let _ = std::fs::remove_file(&opts.out);
+        let _ = std::fs::remove_dir_all(&shared);
+    }
+
+    // SIE-OUT-01 O2: a symlink at an output path is never followed (create_new
+    // refuses it), the target stays untouched and no SI file is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn cli_export_sie_never_follows_a_symlink_at_an_output_path() {
+        let (_db, _out, opts) = export_opts("export-symlink", TESTGARDEN_12);
+        let target = opts.out.with_extension("target");
+        std::fs::write(&target, b"victim").expect("target");
+        std::os::unix::fs::symlink(&target, &opts.manifest).expect("symlink");
+        let e = export_sie(&opts).expect_err("symlink");
+        assert!(e.starts_with("could not create the output file"), "{e}");
+        assert!(!opts.out.exists(), "no SI file without its manifest");
+        assert_eq!(std::fs::read(&target).expect("target"), b"victim");
+        let _ = std::fs::remove_file(&opts.manifest);
+        let _ = std::fs::remove_file(&target);
     }
 
     #[test]

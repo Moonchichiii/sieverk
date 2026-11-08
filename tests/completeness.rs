@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use sieverk::completeness::{
-    completeness_report, CaseOutcome, CompletenessError, CompletenessReport, Field,
+    completeness_report, CaseOutcome, CompletenessError, CompletenessReport, Coverage, Field,
 };
 use sieverk::engine::{run_engine, CaseSource, DecisionStatus, Exclusion};
 use sieverk::export_context::VerifiedExportContext;
@@ -63,9 +63,27 @@ struct Run {
 
 /// The canonical path: create → ingest_snapshot → run_engine → bind → write.
 fn run(db: &TempDb, md: &Masterdata) -> Run {
-    let raw = fs::read(repo(TESTGARDEN)).expect("fixture");
+    run_raw(db, md, &fs::read(repo(TESTGARDEN)).expect("fixture"))
+}
+
+/// Testgården 1.2 keeping only the listed receipt and income ids.
+fn testgarden_only(receipts: &[i64], incomes: &[i64]) -> Vec<u8> {
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo(TESTGARDEN)).expect("fixture")).expect("json");
+    v["receipts"]
+        .as_array_mut()
+        .expect("receipts")
+        .retain(|r| receipts.contains(&r["id"].as_i64().expect("id")));
+    v["income_entries"]
+        .as_array_mut()
+        .expect("incomes")
+        .retain(|i| incomes.contains(&i["id"].as_i64().expect("id")));
+    serde_json::to_vec(&v).expect("json")
+}
+
+fn run_raw(db: &TempDb, md: &Masterdata, raw: &[u8]) -> Run {
     let mut ws = Workspace::create(&db.0).expect("create");
-    let ingested = ws.ingest_snapshot(&raw).expect("ingest_snapshot");
+    let ingested = ws.ingest_snapshot(raw).expect("ingest_snapshot");
     run_engine(&mut ws, md).expect("run_engine");
     let ctx = VerifiedExportContext::bind(&ingested, &ws).expect("bind");
     let meta = ExportMetadata {
@@ -386,4 +404,34 @@ fn k9_tampered_persisted_run_is_refused() {
         matches!(e, CompletenessError::Workspace(WorkspaceError::Corrupt(_))),
         "{e}"
     );
+}
+
+// K10 — SIE-OUT-01 coverage: partial (Testgården), full (only line-bearing
+// rows), empty (no rows). `full` only when nothing is excluded.
+#[test]
+fn k10_coverage_is_full_only_without_exclusions() {
+    let md = masterdata();
+    let db = TempDb::new("k10-partial");
+    let rep = report(&run(&db, &md), &md).expect("partial");
+    assert_eq!(rep.coverage(), Coverage::Partial);
+
+    let db = TempDb::new("k10-full");
+    let r = run_raw(&db, &md, &testgarden_only(&[1, 4], &[2, 6]));
+    let rep = report(&r, &md).expect("full");
+    assert_eq!((rep.cases.len(), rep.vouchers(), rep.excluded()), (4, 4, 0));
+    assert_eq!(rep.coverage(), Coverage::Full);
+    let v: serde_json::Value =
+        serde_json::from_slice(&rep.manifest_json().expect("json")).expect("valid");
+    assert_eq!(v["summary"]["coverage"], "full");
+
+    // One excluded row more ⇒ partial again (fail-closed).
+    let db = TempDb::new("k10-one-more");
+    let r = run_raw(&db, &md, &testgarden_only(&[1, 4, 18], &[2, 6]));
+    let rep = report(&r, &md).expect("partial");
+    assert_eq!((rep.excluded(), rep.coverage()), (1, Coverage::Partial));
+
+    let db = TempDb::new("k10-empty");
+    let r = run_raw(&db, &md, &testgarden_only(&[], &[]));
+    let rep = report(&r, &md).expect("empty");
+    assert_eq!((rep.cases.len(), rep.coverage()), (0, Coverage::Empty));
 }

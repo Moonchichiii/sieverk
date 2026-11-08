@@ -50,6 +50,12 @@ impl Sandbox {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("sandbox");
+        // SIE-OUT-01: export-sie writes only into private directories.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod 0700");
+        }
         Self { dir }
     }
     fn path(&self, name: &str) -> PathBuf {
@@ -222,6 +228,7 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
         "income_entries=6\n",
         "excluded=23\n",
         "silent=0\n",
+        "coverage=partial\n",
     ] {
         assert!(stdout.contains(line), "{line}: {stdout}");
     }
@@ -1193,4 +1200,28 @@ fn f11_currency_shows_only_approved_codes() {
     let (stdout, _) = clean(&out, &sb, &[]);
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains("Currency:    SEK\n"), "{stdout}");
+}
+
+// F12 — SIE-OUT-01: the shared-directory refusal names only the role.
+#[cfg(unix)]
+#[test]
+fn f12_shared_directory_refusal_never_echoes_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("f12");
+    let cwd = Path::new(CRATE);
+    let snap = sb.copy(TESTGARDEN_12, "snap-9001019802.json");
+    let md = sb.masterdata("md-9001019802");
+    let shared = sb.path("delad-9001019802-Kråksjö");
+    fs::create_dir_all(&shared).expect("dir");
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let ws = shared.join("ws-9001019802.duckdb");
+    let out = sb.path("NY9001019802.si");
+    let stderr = fails(&run(export_args(&snap, &md, &ws, &out), cwd), &sb, &[]);
+    assert!(
+        stderr.starts_with(
+            "the directory of <workspace> is accessible to other users; use a private (0700) directory\n"
+        ),
+        "{stderr}"
+    );
+    assert!(!ws.exists() && !out.exists());
 }

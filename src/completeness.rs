@@ -31,6 +31,31 @@ use crate::workspace::{Workspace, WorkspaceError, WORKSPACE_SCHEMA_DECISIONS};
 /// Manifest format identifier.
 pub const MANIFEST_FORMAT: &str = "sieverk-completeness/1";
 
+/// SIE-COMPLETE-01 / SIE-OUT-01: how much of the snapshot the SIE file holds.
+/// `Full` means every snapshot row is an exported voucher — nothing more: it
+/// is not a statement that the bookkeeping is correct, approved or complete
+/// against the source database. Only `Full` may ever be offered as a
+/// complete submission; `Partial` and `Empty` never.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// The snapshot has no receipts and no income entries.
+    Empty,
+    /// At least one row is an explicit exclusion.
+    Partial,
+    /// Every row is an exported voucher.
+    Full,
+}
+
+impl Coverage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Partial => "partial",
+            Self::Full => "full",
+        }
+    }
+}
+
 /// How one source row ends up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaseOutcome {
@@ -96,6 +121,17 @@ impl CompletenessReport {
         self.cases.len() - self.vouchers() - self.excluded()
     }
 
+    /// Fail-closed coverage: `Full` only when nothing is excluded or silent.
+    pub fn coverage(&self) -> Coverage {
+        if self.cases.is_empty() {
+            Coverage::Empty
+        } else if self.excluded() == 0 && self.silent() == 0 {
+            Coverage::Full
+        } else {
+            Coverage::Partial
+        }
+    }
+
     /// Exclusion counts in the fixed `Exclusion::ALL` order (zeros included).
     pub fn excluded_by_reason(&self) -> Vec<(Exclusion, usize)> {
         Exclusion::ALL
@@ -124,6 +160,7 @@ impl CompletenessReport {
             si_sha256: &self.si_sha256,
             si_bytes: self.si_bytes,
             summary: ManifestSummary {
+                coverage: self.coverage().as_str(),
                 cases: self.cases.len(),
                 vouchers: self.vouchers(),
                 excluded: self.excluded(),
@@ -184,6 +221,7 @@ struct Manifest<'a> {
 
 #[derive(Serialize)]
 struct ManifestSummary {
+    coverage: &'static str,
     cases: usize,
     vouchers: usize,
     excluded: usize,
