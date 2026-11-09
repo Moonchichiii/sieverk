@@ -16,8 +16,10 @@ const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
 const TESTGARDEN_11: &str = "fixtures/snapshots/testgarden-2026-1.1.json";
 const TESTGARDEN_12: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
 const MINIMAL_11: &str = "fixtures/snapshots/minimal-1.1.json";
-/// CASE B canonical Testgården (BRIDGE-04, d1da159).
-const CASE_B_SHA256: &str = "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
+/// Testgården export since SIE-INCOME-01 (CASE B + two income vouchers; the
+/// CASE B file itself stays evidence, see tests/sie_writer.rs W1c).
+const TESTGARDEN_SI_SHA256: &str =
+    "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
 
 /// Never printed, in any command, on any outcome.
 const SECRETS: [&str; 12] = [
@@ -48,6 +50,12 @@ impl Sandbox {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("sandbox");
+        // SIE-OUT-01: export-sie writes only into private directories.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("chmod 0700");
+        }
         Self { dir }
     }
     fn path(&self, name: &str) -> PathBuf {
@@ -169,9 +177,20 @@ fn export_args<'a>(
         workspace.as_os_str(),
         OsStr::new("--out"),
         out.as_os_str(),
+        OsStr::new("--manifest"),
+        manifest_for(out).as_os_str(),
         OsStr::new("--generated-on"),
         OsStr::new("2026-09-10"),
     ]
+}
+
+/// SIE-COMPLETE-01: the manifest next to `out` (`<out>.manifest.json`).
+/// Leaked on purpose so `export_args` keeps returning borrowed `OsStr`s —
+/// test-only, a few bytes per call.
+fn manifest_for(out: &Path) -> &'static Path {
+    let mut name = out.as_os_str().to_owned();
+    name.push(".manifest.json");
+    Box::leak(PathBuf::from(name).into_boxed_path())
 }
 
 // P1 — export-sie, inspect-sie (and the bare-path form), validate-sie: success
@@ -187,13 +206,13 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
 
     let stdout = ok(&run(export_args(&snap, &md, &ws, &si), cwd), &sb);
     assert!(
-        stdout.contains(&format!("si_sha256={CASE_B_SHA256}\n")),
+        stdout.contains(&format!("si_sha256={TESTGARDEN_SI_SHA256}\n")),
         "{stdout}"
     );
     for line in [
-        "vouchers=2\n",
-        "accounts=4\n",
-        "bytes=489\n",
+        "vouchers=4\n",
+        "accounts=6\n",
+        "bytes=789\n",
         "entity_type=sole_trader\n",
         "identifier_kind=personal_number\n",
         "fiscal_period=2026-01-01..2026-12-31\n",
@@ -201,7 +220,22 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
         assert!(stdout.contains(line), "{line}: {stdout}");
     }
     let written = fs::read(&si).expect("written SI");
-    assert_eq!(written.len(), 489);
+    assert_eq!(written.len(), 789);
+    // SIE-COMPLETE-01: every row accounted for; the manifest names no person.
+    for line in [
+        "cases=27\n",
+        "receipts=21\n",
+        "income_entries=6\n",
+        "excluded=23\n",
+        "silent=0\n",
+        "coverage=partial\n",
+    ] {
+        assert!(stdout.contains(line), "{line}: {stdout}");
+    }
+    let manifest = fs::read_to_string(manifest_for(&si)).expect("manifest");
+    for needle in SECRETS {
+        assert!(!manifest.contains(needle), "{needle} in manifest");
+    }
 
     for args in [
         vec![OsStr::new("inspect-sie"), si.as_os_str()],
@@ -210,8 +244,8 @@ fn p1_export_and_sie_inspection_succeed_without_leaks() {
         let stdout = ok(&run(args, cwd), &sb);
         assert!(stdout.contains("Company:     [REDACTED]\n"), "{stdout}");
         assert!(stdout.contains("Org number:  [REDACTED]\n"), "{stdout}");
-        assert!(stdout.contains("Vouchers:    2\n"), "{stdout}");
-        assert!(stdout.contains("Ledger rows: 6\n"), "{stdout}");
+        assert!(stdout.contains("Vouchers:    4\n"), "{stdout}");
+        assert!(stdout.contains("Ledger rows: 12\n"), "{stdout}");
     }
     let stdout = ok(&run([OsStr::new("validate-sie"), si.as_os_str()], cwd), &sb);
     assert!(stdout.contains("Status:      "), "{stdout}");
@@ -593,7 +627,7 @@ fn f5_relative_paths_succeed_and_fail_without_leaks() {
     );
     let stdout = ok(&run(export_args(&snap, &md, &ws, &out), &sb.dir), &sb);
     assert!(
-        stdout.contains(&format!("si_sha256={CASE_B_SHA256}\n")),
+        stdout.contains(&format!("si_sha256={TESTGARDEN_SI_SHA256}\n")),
         "{stdout}"
     );
 
@@ -1166,4 +1200,28 @@ fn f11_currency_shows_only_approved_codes() {
     let (stdout, _) = clean(&out, &sb, &[]);
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains("Currency:    SEK\n"), "{stdout}");
+}
+
+// F12 — SIE-OUT-01: the shared-directory refusal names only the role.
+#[cfg(unix)]
+#[test]
+fn f12_shared_directory_refusal_never_echoes_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("f12");
+    let cwd = Path::new(CRATE);
+    let snap = sb.copy(TESTGARDEN_12, "snap-9001019802.json");
+    let md = sb.masterdata("md-9001019802");
+    let shared = sb.path("delad-9001019802-Kråksjö");
+    fs::create_dir_all(&shared).expect("dir");
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let ws = shared.join("ws-9001019802.duckdb");
+    let out = sb.path("NY9001019802.si");
+    let stderr = fails(&run(export_args(&snap, &md, &ws, &out), cwd), &sb, &[]);
+    assert!(
+        stderr.starts_with(
+            "the directory of <workspace> is accessible to other users; use a private (0700) directory\n"
+        ),
+        "{stderr}"
+    );
+    assert!(!ws.exists() && !out.exists());
 }

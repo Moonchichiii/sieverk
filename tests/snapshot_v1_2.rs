@@ -500,8 +500,30 @@ fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
         },
     };
     let out = write_sie4i(&ws, &md, &ctx, &meta).expect("export");
-    assert_eq!(out.bytes.len(), 489);
+    // SIE-INCOME-01: the live export carries two income vouchers (789 bytes);
+    // removing them and their two accounts gives the CASE B file (489 bytes).
+    assert_eq!(out.bytes.len(), 789);
     let mut bytes = out.bytes.clone();
+    for (from, to) in [
+        ("#KONTO 2610 \"Utg\u{86}ende moms\"\r\n", ""),
+        ("#KONTO 3420 \"Leveransvirke\"\r\n", ""),
+        (
+            "#VER \"\" \"3\" 20260420 \"leveransvirke\"\r\n{\r\n#TRANS 1930 {} 120000.00\r\n#TRANS 3420 {} -96000.00\r\n#TRANS 2610 {} -24000.00\r\n}\r\n",
+            "",
+        ),
+        (
+            "#VER \"\" \"4\" 20260708 \"leveransvirke\"\r\n{\r\n#TRANS 1930 {} 47500.00\r\n#TRANS 3420 {} -38000.00\r\n#TRANS 2610 {} -9500.00\r\n}\r\n",
+            "",
+        ),
+    ] {
+        let needle: Vec<u8> = from.chars().map(|c| c as u32 as u8).collect();
+        let at = bytes
+            .windows(needle.len())
+            .position(|w| w == needle.as_slice())
+            .expect("income needle present");
+        bytes.splice(at..at + needle.len(), to.bytes());
+    }
+    assert_eq!(bytes.len(), 489);
     for (from, to) in [
         ("#VER \"\" \"1\" ", "#VER \"\" \"\" "),
         ("#VER \"\" \"2\" ", "#VER \"\" \"\" "),

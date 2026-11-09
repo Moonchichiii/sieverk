@@ -528,6 +528,26 @@ pub const SLICE3_FINDING_SEVERITY: [(&str, &str); 7] = [
     ("MISSING_EVIDENCE", "warning"),
 ];
 
+/// SIE-INCOME-01 / D-INC: the income counter-row key is derived from the
+/// income's `payment_date` alone — `betald` when a payment date exists,
+/// otherwise `obetald`. Used by the engine to select the row and by
+/// `check_run_rows` to verify a persisted income counter reference.
+pub fn income_counter_key(payment_date: Option<NaiveDate>) -> &'static str {
+    if payment_date.is_some() {
+        "betald"
+    } else {
+        "obetald"
+    }
+}
+
+/// SIE-INCOME-01: the (role, side) pairs a schema-3 line may carry per
+/// source. `true` = debit, `false` = credit. Receipt `rounding` stays
+/// unpermitted until E3 is implemented.
+const RECEIPT_LINE_ROLES: [(&str, bool); 3] =
+    [("expense", true), ("input_vat", true), ("counter", false)];
+const INCOME_LINE_ROLES: [(&str, bool); 3] =
+    [("counter", true), ("income", false), ("output_vat", false)];
+
 /// Whether a schema version holds engine-run tables.
 fn is_run_schema(schema: i32) -> bool {
     schema == WORKSPACE_SCHEMA_ENGINE || schema == WORKSPACE_SCHEMA_DECISIONS
@@ -2195,9 +2215,20 @@ fn check_run_rows(
                     )));
                 }
                 if c.source == "income" {
-                    return Err(corrupt(format!(
-                        "case {i}: income counter reference is not allowed in Slice 2"
-                    )));
+                    // Schema 2 (Slice-2 evidence) never carries an income
+                    // reference; schema 3 (SIE-INCOME-01) only the D-INC key.
+                    if schema == WORKSPACE_SCHEMA_ENGINE {
+                        return Err(corrupt(format!(
+                            "case {i}: income counter reference is not allowed in Slice 2"
+                        )));
+                    }
+                    let expected = income_counter_key(c.payment_date);
+                    if key != expected {
+                        return Err(corrupt(format!(
+                            "case {i}: income counter_key {key} != {expected} derived from payment_date"
+                        )));
+                    }
+                    continue;
                 }
                 match &c.payment_method {
                     Some(pm) if pm == key => {}
@@ -2406,6 +2437,29 @@ fn check_run_rows(
                 "line {idx}: exactly one side must be positive"
             )));
         }
+        // SIE-INCOME-01: role must belong to the case's source, on its side.
+        let allowed: &[(&str, bool)] = match cases[ci].source.as_str() {
+            "receipt" => &RECEIPT_LINE_ROLES,
+            "income" => &INCOME_LINE_ROLES,
+            other => return Err(corrupt(format!("line {idx}: unknown source {other:?}"))),
+        };
+        match allowed.iter().find(|(r, _)| *r == l.role.as_str()) {
+            None => {
+                return Err(corrupt(format!(
+                    "line {idx}: role {} is not allowed for source {}",
+                    l.role, cases[ci].source
+                )))
+            }
+            Some((_, debit_side)) if *debit_side != (l.debit.0 > 0) => {
+                return Err(corrupt(format!(
+                    "line {idx}: role {} must be on the {} side for source {}",
+                    l.role,
+                    if *debit_side { "debit" } else { "credit" },
+                    cases[ci].source
+                )))
+            }
+            Some(_) => {}
+        }
         debit_sum[ci] = debit_sum[ci]
             .checked_add(l.debit.0)
             .ok_or_else(|| corrupt(format!("line {idx}: debit sum overflow")))?;
@@ -2426,6 +2480,13 @@ fn check_run_rows(
                     debit_sum[ci], credit_sum[ci]
                 )));
             }
+        } else if schema == WORKSPACE_SCHEMA_DECISIONS && c.status != "Manual" {
+            // SIE-COMPLETE-01: in a decision run every zero-line case is
+            // Manual; anything else would be a silent exclusion.
+            return Err(corrupt(format!(
+                "case {ci}: {} case without lines (silent exclusion)",
+                c.status
+            )));
         } else if c.status == "Automatic" {
             return Err(corrupt(format!("case {ci}: Automatic case without lines")));
         }

@@ -28,8 +28,18 @@
 //! `ingen`/non-ingående/zero-rate VAT rules) become Manual; VAT automation
 //! that is genuinely unresolved or mathematically mismatched gets its Blocking
 //! finding and becomes Manual; the E3-deferred non-zero-rounding path keeps
-//! its structural status. No branch beyond the lock is invented. Income
-//! lines, rounding lines, E3–E6 and voucher identity are not implemented.
+//! its structural status. No branch beyond the lock is invented. Rounding
+//! lines, E3–E6 and voucher identity are not implemented.
+//!
+//! SIE-INCOME-01 (rev 1) adds income lines on the same principles: the
+//! income counter row is keyed `betald`/`obetald` by `payment_date`
+//! (D-INC, `workspace::income_counter_key`), an utgående/full/single-rate
+//! VAT rule is verified with Formula B on `ex_vat`, and exactly three lines
+//! are proposed — counter D inc_vat, income K ex_vat, output VAT K vat.
+//! Every other income outcome is Manual: with a Blocking finding, or one of
+//! the documented no-finding branches (non-registered entity, non-utgående /
+//! zero-rate rule). An income case never leaves the engine non-Manual
+//! without lines.
 //!
 //! Money stays `Ore(i64)`; every check uses checked i64 arithmetic. Nothing
 //! here ever reads the snapshot JSON again.
@@ -42,8 +52,8 @@ use chrono::NaiveDate;
 use crate::money::Ore;
 use crate::ruleset::{AccountingCase as RuleCase, CounterRule, Masterdata, VatRule};
 use crate::workspace::{
-    EngineState, EntityContext, PersistedCase, PersistedFinding, PersistedLine, RunMeta,
-    RunProvenance, Workspace, WorkspaceError, WORKSPACE_SCHEMA,
+    income_counter_key, EngineState, EntityContext, PersistedCase, PersistedFinding, PersistedLine,
+    RunMeta, RunProvenance, Workspace, WorkspaceError, WORKSPACE_SCHEMA,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,7 +67,7 @@ pub enum CaseSource {
 }
 
 impl CaseSource {
-    fn key_prefix(self) -> &'static str {
+    pub fn key_prefix(self) -> &'static str {
         match self {
             Self::Receipt => "receipt",
             Self::Income => "income",
@@ -198,7 +208,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Info => "info",
             Self::Warning => "warning",
@@ -208,7 +218,7 @@ impl Severity {
 }
 
 impl DecisionStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Automatic => "Automatic",
             Self::Conditional => "Conditional",
@@ -237,7 +247,8 @@ pub struct CaseAssessment {
     pub rule_case_id: Option<String>,
     /// Preserved id only — no VAT finding is derived in Slice 1.
     pub vat_rule_id: Option<String>,
-    /// Receipts: the single matching counter row; income: `None` in Slice 1.
+    /// The single matching counter row (receipts by payment_method, income by
+    /// `income_counter_key(payment_date)` since SIE-INCOME-01).
     pub counter_rule: Option<CounterRuleRef>,
     pub status_ceiling: DecisionStatus,
     pub findings: Vec<Finding>,
@@ -280,6 +291,11 @@ pub enum EngineError {
     TaxonomyMismatch {
         entity_version: String,
         ruleset_version: String,
+    },
+    /// SIE-COMPLETE-01: a decision would leave a case with zero lines without
+    /// being Manual — a silent exclusion. Never persisted, never exported.
+    SilentExclusion {
+        case_seq: i32,
     },
 }
 
@@ -324,6 +340,10 @@ impl fmt::Display for EngineError {
             } => write!(
                 f,
                 "workspace taxonomy {entity_version} does not match ruleset taxonomy {ruleset_version}"
+            ),
+            Self::SilentExclusion { case_seq } => write!(
+                f,
+                "case {case_seq}: zero lines without a Manual status would be a silent exclusion; refusing"
             ),
         }
     }
@@ -579,11 +599,52 @@ fn select_counter_row<'a>(
             None,
         )));
     };
+    select_counter_candidates(
+        case,
+        "receipt",
+        key,
+        format!("no counter rule for payment_method {key:?}"),
+        entity,
+        masterdata,
+    )
+}
+
+/// SIE-INCOME-01 income counter lookup (D-INC): the key is derived from
+/// `payment_date` only (`betald` / `obetald`), then the same candidate rule
+/// as receipts — source, key, bookkeeping-method filter, never a precedence.
+fn select_income_counter_row<'a>(
+    case: &EngineCase,
+    payment_date: Option<NaiveDate>,
+    entity: &EntityContext,
+    masterdata: &'a Masterdata,
+) -> Result<CounterSelection<'a>, EngineError> {
+    let key = income_counter_key(payment_date);
+    select_counter_candidates(
+        case,
+        "income",
+        key,
+        format!("no counter rule for income key {key:?}"),
+        entity,
+        masterdata,
+    )
+}
+
+/// Shared candidate rule: rows with exactly this source and key whose
+/// bookkeeping method is generic or equals the entity's. 0 ⇒ the given
+/// Blocking finding, 1 ⇒ the row, >1 ⇒ structural error.
+fn select_counter_candidates<'a>(
+    case: &EngineCase,
+    source: &str,
+    key: &str,
+    none_message: String,
+    entity: &EntityContext,
+    masterdata: &'a Masterdata,
+) -> Result<CounterSelection<'a>, EngineError> {
     let candidates: Vec<&CounterRule> = masterdata
         .counter
         .rows
         .iter()
-        .filter(|r| r.source == "receipt" && r.key == key)
+        .filter(|r| r.source == source && r.key == key)
         .filter(
             |r| match (&r.bookkeeping_method, &entity.bookkeeping_method) {
                 (None, _) => true,
@@ -596,7 +657,7 @@ fn select_counter_row<'a>(
         0 => Ok(Err(finding(
             FindingCode::UnresolvedCounterAccount,
             Severity::Blocking,
-            format!("no counter rule for payment_method {key:?}"),
+            none_message,
             None,
         ))),
         1 => Ok(Ok(candidates[0])),
@@ -669,13 +730,25 @@ pub fn assess_cases(
             }
         }
 
-        // 2. Receipt counter row (income keying is deferred beyond Slice 1).
+        // 2. Counter row: receipts by payment_method, income by D-INC key.
         let mut counter_rule = None;
-        if let SourceFacts::Receipt { payment_method, .. } = &case.facts {
-            match select_counter_row(case, payment_method.as_deref(), entity, masterdata)? {
+        let selection = match &case.facts {
+            SourceFacts::Receipt { payment_method, .. } => Some((
+                CaseSource::Receipt,
+                "payment_method",
+                select_counter_row(case, payment_method.as_deref(), entity, masterdata)?,
+            )),
+            SourceFacts::Income { payment_date, .. } => Some((
+                CaseSource::Income,
+                "income key",
+                select_income_counter_row(case, *payment_date, entity, masterdata)?,
+            )),
+        };
+        if let Some((source, label, selected)) = selection {
+            match selected {
                 Ok(row) => {
                     counter_rule = Some(CounterRuleRef {
-                        source: CaseSource::Receipt,
+                        source,
                         key: row.key.clone(),
                         bookkeeping_method: row.bookkeeping_method.clone(),
                     });
@@ -687,10 +760,7 @@ pub fn assess_cases(
                         None => findings.push(finding(
                             FindingCode::UnresolvedCounterAccount,
                             Severity::Blocking,
-                            format!(
-                                "counter rule for payment_method {:?} has no account",
-                                row.key
-                            ),
+                            format!("counter rule for {label} {:?} has no account", row.key),
                             row.question.clone(),
                         )),
                     }
@@ -806,9 +876,49 @@ pub struct ProposedLine {
     pub credit: Ore,
 }
 
-/// The decision for one case: the structural assessment plus, for the
-/// first receipt sub-slice, E1/E2 findings and proposed lines.
-/// Invariants: Manual ⇒ lines empty; any Blocking ⇒ Manual; lines balance.
+/// SIE-COMPLETE-01: the explicit reason a case carries no lines. Derived
+/// in memory by `decide_cases` (no DDL change); every zero-line decision has
+/// exactly one, every line-bearing decision has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Exclusion {
+    /// At least one Blocking finding (its codes are the detailed reason).
+    BlockingFindings,
+    /// A rule case or counter row whose automation is Manual (no finding).
+    ManualAutomation,
+    /// `vat_registered` is not `yes`: the gross branch is not implemented.
+    EntityNotVatRegistered,
+    /// A known VAT branch outside the implemented positive single-rate one
+    /// (partial/no deductibility, wrong direction, rate 0).
+    VatBranchNotImplemented,
+    /// Non-zero öre rounding (E3): no rounding account or rule exists in the
+    /// masterdata, so the engine never invents one — the case is Manual.
+    RoundingNotImplemented,
+}
+
+impl Exclusion {
+    pub const ALL: [Exclusion; 5] = [
+        Self::BlockingFindings,
+        Self::ManualAutomation,
+        Self::EntityNotVatRegistered,
+        Self::VatBranchNotImplemented,
+        Self::RoundingNotImplemented,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockingFindings => "BLOCKING_FINDINGS",
+            Self::ManualAutomation => "MANUAL_AUTOMATION",
+            Self::EntityNotVatRegistered => "ENTITY_NOT_VAT_REGISTERED",
+            Self::VatBranchNotImplemented => "VAT_BRANCH_NOT_IMPLEMENTED",
+            Self::RoundingNotImplemented => "ROUNDING_NOT_IMPLEMENTED",
+        }
+    }
+}
+
+/// The decision for one case: the structural assessment plus E1/E2
+/// findings and proposed lines.
+/// Invariants: Manual ⇒ lines empty; any Blocking ⇒ Manual; lines balance;
+/// (SIE-COMPLETE-01) lines empty ⇔ Manual ⇔ `exclusion.is_some()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountingDecision {
     pub case_seq: i32,
@@ -818,17 +928,20 @@ pub struct AccountingDecision {
     pub counter_rule: Option<CounterRuleRef>,
     pub lines: Vec<ProposedLine>,
     pub findings: Vec<Finding>,
+    /// Why the case has no lines; `None` exactly when it has lines.
+    pub exclusion: Option<Exclusion>,
 }
 
-/// Why a receipt does not reach line construction in this sub-slice.
+/// Why a case does not reach line construction.
 enum Skip {
-    /// The structural outcome stands (structural status kept, zero lines, no
-    /// finding): an already-blocked/Manual case, an unusable rule case or
-    /// counter row, or the E3-deferred non-zero-rounding path.
-    Silent,
-    /// A known but not implemented VAT branch (FINAL lock §2.2 / §2.4):
-    /// status Manual, zero lines, no finding — nothing is claimed mismatched.
-    Manual,
+    /// The assessment already made the case Manual (a Blocking finding or a
+    /// Manual automation). `decide_cases` refuses with `SilentExclusion` if
+    /// the status is not in fact Manual — never a silent zero-line outcome.
+    AlreadyManual,
+    /// A known but not implemented branch (entity gate §2.2, VAT branch
+    /// §2.4, E3 rounding): status Manual, zero lines, no finding — nothing is
+    /// claimed mismatched, the reason is explicit.
+    NotImplemented(Exclusion),
     /// Known-unresolved VAT automation (L-FIND) — Blocking finding, Manual.
     UnresolvedVat(String),
     /// E1 mathematical mismatch — Blocking finding, Manual.
@@ -863,7 +976,8 @@ fn expected_vat_ore(case_seq: i32, net: Ore, rate: i64) -> Result<i64, EngineErr
 }
 
 /// The single positive rate of a rule usable for this sub-slice, or a Skip.
-fn single_positive_rate(rule: &VatRule) -> Result<i64, Skip> {
+/// `direction` is `ingående` for receipts and `utgående` for income.
+fn single_positive_rate(rule: &VatRule, direction: &str) -> Result<i64, Skip> {
     if rule.manual_review {
         return Err(Skip::UnresolvedVat(format!(
             "vat rule {} requires manual review",
@@ -884,14 +998,15 @@ fn single_positive_rate(rule: &VatRule) -> Result<i64, Skip> {
         )));
     }
     // Known but out-of-scope branches (§2.4): Manual, zero lines, no finding.
-    if rule.deductibility != "full" || rule.direction != "ingående" {
-        return Err(Skip::Manual);
+    if rule.deductibility != "full" || rule.direction != direction {
+        return Err(Skip::NotImplemented(Exclusion::VatBranchNotImplemented));
     }
     match rule.rates[0].as_str() {
         "25" => Ok(25),
         "12" => Ok(12),
         "6" => Ok(6),
-        _ => Err(Skip::Manual), // "0" (validated set) — not a positive-VAT branch
+        // "0" (validated set) — not a positive-VAT branch.
+        _ => Err(Skip::NotImplemented(Exclusion::VatBranchNotImplemented)),
     }
 }
 
@@ -913,7 +1028,7 @@ fn receipt_lines(
         ..
     } = &case.facts
     else {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::AlreadyManual));
     };
     // §2.1 existing Blocking finding ⇒ no E1, no lines.
     if assessment
@@ -921,23 +1036,23 @@ fn receipt_lines(
         .iter()
         .any(|f| f.severity == Severity::Blocking)
     {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::AlreadyManual));
     }
     // A ceiling of Manual (e.g. a Manual rule/counter automation) never carries lines.
     if assessment.status_ceiling == DecisionStatus::Manual {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::AlreadyManual));
     }
     // §2.2 E2 entity gate: any value but "yes" is outside the implemented
     // branch — Manual, zero lines, no invented gross-expense rule or finding.
     if entity.vat_registered.as_deref() != Some("yes") {
-        return Ok(Err(Skip::Manual));
+        return Ok(Err(Skip::NotImplemented(Exclusion::EntityNotVatRegistered)));
     }
     // §2.3 rule case with account and a VAT rule id.
     let Some(rule) = default_rule_case(case, masterdata) else {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::AlreadyManual));
     };
     let Some(expense_account) = rule.account.as_deref() else {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::AlreadyManual));
     };
     let Some(vat_rule_id) = rule.vat_rule.as_deref() else {
         return Ok(Err(Skip::UnresolvedVat(format!(
@@ -952,7 +1067,7 @@ fn receipt_lines(
             detail: format!("vat rule {vat_rule_id:?} does not resolve"),
         });
     };
-    let rate = match single_positive_rate(vat_rule) {
+    let rate = match single_positive_rate(vat_rule, "ingående") {
         Ok(r) => r,
         Err(skip) => return Ok(Err(skip)),
     };
@@ -961,17 +1076,21 @@ fn receipt_lines(
         match select_counter_row(case, payment_method.as_deref(), entity, masterdata)? {
             Ok(row) => match row.account.as_deref() {
                 Some(a) => a.to_string(),
-                None => return Ok(Err(Skip::Silent)),
+                None => return Ok(Err(Skip::AlreadyManual)),
             },
-            Err(_) => return Ok(Err(Skip::Silent)),
+            Err(_) => return Ok(Err(Skip::AlreadyManual)),
         };
-    // §2.6 rounding gate.
+    // §2.6 rounding gate (E3 deferred). SIE-COMPLETE-01: explicit, Manual —
+    // the masterdata names no rounding account, so none is invented.
     if rounding.0 != 0 {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::NotImplemented(Exclusion::RoundingNotImplemented)));
     }
-    // §3 E1 preconditions and Formula B.
+    // §3 E1 preconditions and Formula B. Credit notes are not implemented —
+    // never silent (same rule as income D-NEG).
     if net.0 <= 0 || total.0 <= 0 || vat.0 < 0 {
-        return Ok(Err(Skip::Silent));
+        return Ok(Err(Skip::UnresolvedVat(
+            "receipt amounts are not positive; credit notes are not implemented".to_string(),
+        )));
     }
     let expected = expected_vat_ore(seq, *net, rate)?;
     if vat.0 == 0 {
@@ -1040,9 +1159,155 @@ fn receipt_lines(
     ]))
 }
 
-/// Slice 3 decision step over the structural assessment. Receipts that pass
-/// every locked gate get three balanced lines; every other case keeps its
-/// structural outcome with zero lines. Never invents accounts or amounts.
+/// SIE-INCOME-01: the three-line construction for one eligible income
+/// entry, or the Skip that keeps it fail-closed. Mirrors `receipt_lines`;
+/// structural failures are `EngineError`s. Locked line order:
+/// counter D inc_vat · income K ex_vat · output VAT K vat.
+fn income_lines(
+    case: &EngineCase,
+    assessment: &CaseAssessment,
+    entity: &EntityContext,
+    masterdata: &Masterdata,
+) -> Result<Result<Vec<ProposedLine>, Skip>, EngineError> {
+    let seq = case.case_seq;
+    let SourceFacts::Income {
+        ex_vat,
+        vat,
+        inc_vat,
+        payment_date,
+        ..
+    } = &case.facts
+    else {
+        return Ok(Err(Skip::AlreadyManual));
+    };
+    // An existing Blocking finding or a Manual ceiling: the case is already
+    // Manual with its reason; no lines.
+    if assessment
+        .findings
+        .iter()
+        .any(|f| f.severity == Severity::Blocking)
+    {
+        return Ok(Err(Skip::AlreadyManual));
+    }
+    if assessment.status_ceiling == DecisionStatus::Manual {
+        return Ok(Err(Skip::AlreadyManual));
+    }
+    // Entity gate (same as receipts §2.2): Manual, zero lines, no finding.
+    if entity.vat_registered.as_deref() != Some("yes") {
+        return Ok(Err(Skip::NotImplemented(Exclusion::EntityNotVatRegistered)));
+    }
+    // Rule case with an account (a missing one already carries UNMAPPED_CATEGORY).
+    let Some(rule) = default_rule_case(case, masterdata) else {
+        return Ok(Err(Skip::AlreadyManual));
+    };
+    let Some(income_account) = rule.account.as_deref() else {
+        return Ok(Err(Skip::AlreadyManual));
+    };
+    let Some(vat_rule_id) = rule.vat_rule.as_deref() else {
+        return Ok(Err(Skip::UnresolvedVat(format!(
+            "rule case {} has no vat rule",
+            rule.case_id
+        ))));
+    };
+    let Some(vat_rule) = masterdata.vat.rules.iter().find(|r| r.id == vat_rule_id) else {
+        return Err(EngineError::Masterdata {
+            case_seq: seq,
+            detail: format!("vat rule {vat_rule_id:?} does not resolve"),
+        });
+    };
+    let rate = match single_positive_rate(vat_rule, "utgående") {
+        Ok(r) => r,
+        Err(skip) => return Ok(Err(skip)),
+    };
+    // Counter row with an account (a missing account already carries a finding).
+    let counter_account = match select_income_counter_row(case, *payment_date, entity, masterdata)?
+    {
+        Ok(row) => match row.account.as_deref() {
+            Some(a) => a.to_string(),
+            None => return Ok(Err(Skip::AlreadyManual)),
+        },
+        Err(_) => return Ok(Err(Skip::AlreadyManual)),
+    };
+    // D-NEG: credit notes / non-positive amounts are not implemented — never silent.
+    if ex_vat.0 <= 0 || inc_vat.0 <= 0 || vat.0 < 0 {
+        return Ok(Err(Skip::UnresolvedVat(
+            "income amounts are not positive; credit notes are not implemented".to_string(),
+        )));
+    }
+    // Formula B on the income (ex VAT), L-ZERO-VAT as for receipts.
+    let expected = expected_vat_ore(seq, *ex_vat, rate)?;
+    if vat.0 == 0 {
+        return Ok(Err(if expected > 0 {
+            Skip::VatMismatch(format!(
+                "source vat 0 but expected {expected} öre at {rate} %"
+            ))
+        } else {
+            Skip::UnresolvedVat(
+                "expected vat is zero at this amount; a zero output-VAT line is not representable"
+                    .to_string(),
+            )
+        }));
+    }
+    if vat.0 != expected {
+        return Ok(Err(Skip::VatMismatch(format!(
+            "source vat {} does not equal expected {expected} öre at {rate} %",
+            vat.0
+        ))));
+    }
+    let status = assessment.status_ceiling;
+    for account in [
+        counter_account.as_str(),
+        income_account,
+        vat_rule.vat_account.as_str(),
+    ] {
+        proposal_guard(seq, account, status, entity, masterdata)?;
+    }
+    let sum = ex_vat
+        .0
+        .checked_add(vat.0)
+        .ok_or_else(|| EngineError::MoneyInvariant {
+            case_seq: seq,
+            detail: "ex_vat + vat overflows i64".to_string(),
+        })?;
+    if sum != inc_vat.0 {
+        return Err(EngineError::MoneyInvariant {
+            case_seq: seq,
+            detail: format!(
+                "ex_vat {} + vat {} != inc_vat {} (öre)",
+                ex_vat.0, vat.0, inc_vat.0
+            ),
+        });
+    }
+    Ok(Ok(vec![
+        ProposedLine {
+            line_no: 0,
+            account: counter_account,
+            role: LineRole::Counter,
+            debit: *inc_vat,
+            credit: Ore(0),
+        },
+        ProposedLine {
+            line_no: 1,
+            account: income_account.to_string(),
+            role: LineRole::Income,
+            debit: Ore(0),
+            credit: *ex_vat,
+        },
+        ProposedLine {
+            line_no: 2,
+            account: vat_rule.vat_account.clone(),
+            role: LineRole::OutputVat,
+            debit: Ore(0),
+            credit: *vat,
+        },
+    ]))
+}
+
+/// Slice 3 decision step over the structural assessment. Receipts and
+/// income entries that pass every locked gate get three balanced lines; every
+/// other case is Manual with zero lines and one explicit `Exclusion`
+/// (SIE-COMPLETE-01: a non-Manual zero-line decision is `SilentExclusion`).
+/// Never invents accounts or amounts.
 pub fn decide_cases(
     cases: &[EngineCase],
     assessments: &[CaseAssessment],
@@ -1053,38 +1318,58 @@ pub fn decide_cases(
     for (case, a) in cases.iter().zip(assessments) {
         let mut status = a.status_ceiling;
         let mut findings = a.findings.clone();
-        let lines = match case.source {
-            CaseSource::Income => Vec::new(),
-            CaseSource::Receipt => match receipt_lines(case, a, entity, masterdata)? {
-                Ok(lines) => lines,
-                Err(Skip::Silent) => Vec::new(),
-                Err(Skip::Manual) => {
-                    status = DecisionStatus::Manual;
-                    Vec::new()
-                }
-                Err(Skip::UnresolvedVat(message)) => {
-                    findings.push(finding(
-                        FindingCode::UnresolvedVat,
-                        Severity::Blocking,
-                        message,
-                        None,
-                    ));
-                    status = DecisionStatus::Manual;
-                    Vec::new()
-                }
-                Err(Skip::VatMismatch(message)) => {
-                    findings.push(finding(
-                        FindingCode::VatMismatch,
-                        Severity::Blocking,
-                        message,
-                        None,
-                    ));
-                    status = DecisionStatus::Manual;
-                    Vec::new()
-                }
-            },
+        let outcome = match case.source {
+            CaseSource::Receipt => receipt_lines(case, a, entity, masterdata)?,
+            CaseSource::Income => income_lines(case, a, entity, masterdata)?,
+        };
+        let (lines, mut exclusion) = match outcome {
+            Ok(lines) => (lines, None),
+            // The assessment's own reason; checked against the status below.
+            Err(Skip::AlreadyManual) => (Vec::new(), None),
+            Err(Skip::NotImplemented(reason)) => {
+                status = DecisionStatus::Manual;
+                (Vec::new(), Some(reason))
+            }
+            Err(Skip::UnresolvedVat(message)) => {
+                findings.push(finding(
+                    FindingCode::UnresolvedVat,
+                    Severity::Blocking,
+                    message,
+                    None,
+                ));
+                status = DecisionStatus::Manual;
+                (Vec::new(), None)
+            }
+            Err(Skip::VatMismatch(message)) => {
+                findings.push(finding(
+                    FindingCode::VatMismatch,
+                    Severity::Blocking,
+                    message,
+                    None,
+                ));
+                status = DecisionStatus::Manual;
+                (Vec::new(), None)
+            }
         };
         renumber(&mut findings);
+        // SIE-COMPLETE-01: every zero-line case is Manual with exactly one
+        // explicit reason; anything else is refused before persistence.
+        if lines.is_empty() {
+            if status != DecisionStatus::Manual {
+                return Err(EngineError::SilentExclusion {
+                    case_seq: a.case_seq,
+                });
+            }
+            if exclusion.is_none() {
+                exclusion = Some(
+                    if findings.iter().any(|f| f.severity == Severity::Blocking) {
+                        Exclusion::BlockingFindings
+                    } else {
+                        Exclusion::ManualAutomation
+                    },
+                );
+            }
+        }
         out.push(AccountingDecision {
             case_seq: a.case_seq,
             status,
@@ -1093,6 +1378,7 @@ pub fn decide_cases(
             counter_rule: a.counter_rule.clone(),
             lines,
             findings,
+            exclusion,
         });
     }
     Ok(out)

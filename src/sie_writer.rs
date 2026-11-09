@@ -1,7 +1,8 @@
 //! SV-04 Slice 1 — SIE 4I writer (serialization only).
 //!
 //! Turns an already-verified schema-3 engine run into SIE 4I bytes: one
-//! `#VER` per line-bearing non-Manual decision, one `#TRANS` per persisted
+//! `#VER` per line-bearing non-Manual decision (SIE-COMPLETE-01: a
+//! non-Manual decision without lines is refused, never skipped), one `#TRANS` per persisted
 //! line, `#KONTO` for exactly the accounts those lines use, names from the
 //! chart whose identity the persisted run provenance names. Nothing is
 //! decided here: no account is chosen or changed, no VAT is inferred, no
@@ -60,6 +61,9 @@ pub struct ExportMetadata {
 pub struct SieExport {
     pub bytes: Vec<u8>,
     pub vouchers: usize,
+    /// SIE-COMPLETE-01: `case_seq` of each emitted `#VER`, in emission order;
+    /// element `i` is voucher number `i + 1`.
+    pub voucher_case_seqs: Vec<i32>,
     pub accounts: usize,
     /// SHA-256 of `bytes`, computed by DuckDB — evidence only, not in the file.
     pub sha256: String,
@@ -340,13 +344,12 @@ fn eligible_vouchers<'a>(
                 })
             }
             (false, true) => {
-                if case.status == "Automatic" {
-                    return Err(SieWriteError::IneligibleDecision {
-                        case_seq: case.case_seq,
-                        reason: "Automatic decision without lines".to_string(),
-                    });
-                }
-                // Conditional without lines: structurally assessed only — not a voucher.
+                // SIE-COMPLETE-01: a non-Manual decision without lines would
+                // vanish from the file without a reason — refused, never skipped.
+                return Err(SieWriteError::IneligibleDecision {
+                    case_seq: case.case_seq,
+                    reason: format!("{} decision without lines (silent exclusion)", case.status),
+                });
             }
             (false, false) => out.push(Voucher { case, lines: mine }),
         }
@@ -527,6 +530,7 @@ pub fn write_sie4i(
     Ok(SieExport {
         bytes,
         vouchers: vouchers.len(),
+        voucher_case_seqs: vouchers.iter().map(|v| v.case.case_seq).collect(),
         accounts: konto_lines.len(),
         sha256,
     })

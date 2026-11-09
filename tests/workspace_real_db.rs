@@ -1203,8 +1203,9 @@ fn s1_run_preserves_schema_v1_rows_and_fingerprint() {
     assert_eq!(v1_state(&ws), before);
     assert_eq!(ws.read_meta().expect("meta"), meta_before);
     assert_eq!(ws.read_entity().expect("entity"), entity_before);
-    // Slice 3: Bränsle + Skogsvård carry three lines each; everything else zero.
-    assert_eq!((ev.cases, ev.lines), (27, 6));
+    // Slice 3: Bränsle + Skogsvård carry three lines each; SIE-INCOME-01 adds
+    // the two paid leveransvirke incomes (three lines each); everything else zero.
+    assert_eq!((ev.cases, ev.lines), (27, 12));
     let mut expected: Vec<String> = v1_tables();
     expected.extend(SCHEMA_V2_TABLES.iter().map(|s| s.to_string()));
     expected.sort();
@@ -1232,7 +1233,7 @@ fn s2_persisted_run_survives_reopen_and_verifies() {
     assert!(findings
         .windows(2)
         .all(|w| (w[0].case_seq, w[0].finding_no) < (w[1].case_seq, w[1].finding_no)));
-    assert_eq!(ws.read_decision_lines().expect("lines").len(), 6);
+    assert_eq!(ws.read_decision_lines().expect("lines").len(), 12);
     assert_eq!(ws.verify_run().expect("verify"), ev.run);
 }
 
@@ -1242,8 +1243,10 @@ fn s3_schema2_evidence_rejects_any_decision_line() {
     let db = TempDb::new("s3");
     let (ws, ev) = run_testgarden(&db);
     // Reconstruct a Slice-2 evidence file from this run: schema 2, zero lines,
-    // digest recomputed over the zero-line content (what the Slice-2 build wrote).
+    // no income counter references (Slice 2 wrote NULL), digest recomputed over
+    // that content (what the Slice-2 build wrote).
     sql(&ws, "DELETE FROM decision_lines");
+    sql(&ws, "UPDATE accounting_cases SET counter_source = NULL, counter_key = NULL, counter_bookkeeping_method = NULL WHERE source = 'income'");
     let cases = ws.read_cases().expect("cases");
     let findings = ws.read_findings().expect("findings");
     let d2 = ws
@@ -1264,6 +1267,14 @@ fn s3_schema2_evidence_rejects_any_decision_line() {
     assert_eq!(count(&ws, "decision_lines"), 0);
     ws.verify_run()
         .expect("zero-line schema-2 evidence verifies");
+    // An income counter reference stays forbidden in a schema-2 file.
+    sql(&ws, "UPDATE accounting_cases SET counter_source = 'income', counter_key = 'betald' WHERE case_seq = (SELECT min(case_seq) FROM accounting_cases WHERE source = 'income' AND payment_date IS NOT NULL)");
+    let e = ws.verify_run().expect_err("schema-2 income reference");
+    assert!(
+        matches!(&e, WorkspaceError::Corrupt(m) if m.contains("not allowed in Slice 2")),
+        "{e}"
+    );
+    sql(&ws, "UPDATE accounting_cases SET counter_source = NULL, counter_key = NULL WHERE source = 'income'");
     sql(
         &ws,
         "INSERT INTO decision_lines VALUES (0, 0, '5360', 'expense', 1000, 0)",
@@ -1314,7 +1325,7 @@ fn s5_rollback_via_engine_run_meta_check_leaves_exact_schema_v1_state() {
     let cases = dws.read_cases().expect("cases");
     let findings = dws.read_findings().expect("findings");
     let lines = dws.read_decision_lines().expect("lines");
-    assert_eq!(lines.len(), 6, "the donor run carries lines");
+    assert_eq!(lines.len(), 12, "the donor run carries lines");
 
     let db = TempDb::new("s5");
     let mut ws = ingest_testgarden(&db);
@@ -1689,12 +1700,16 @@ fn s11_testgarden_persisted_counts_references_and_types() {
         (Some("receipt"), Some("unknown"), None)
     );
     assert_eq!(unknown.status, "Manual");
-    assert!(cases
-        .iter()
-        .filter(|c| c.source == "income")
-        .all(|c| c.counter_source.is_none()
-            && c.counter_key.is_none()
-            && c.counter_bookkeeping_method.is_none()));
+    // SIE-INCOME-01 (D-INC): every income reference is the payment_date key.
+    for c in cases.iter().filter(|c| c.source == "income") {
+        let expected = if c.payment_date.is_some() {
+            "betald"
+        } else {
+            "obetald"
+        };
+        assert_eq!(c.counter_source.as_deref(), Some("income"));
+        assert_eq!(c.counter_key.as_deref(), Some(expected));
+    }
     assert!(findings
         .iter()
         .all(|f| f.code != "UNRESOLVED_VAT" && f.code != "VAT_MISMATCH"));
@@ -1715,7 +1730,8 @@ fn s11_testgarden_persisted_counts_references_and_types() {
         .is_some()
         && c.entry_type.as_deref() == Some("expense")
         && c.area.is_some()));
-    assert_eq!(count(&ws, "decision_lines"), 6);
+    // Two receipts + two paid incomes (SIE-INCOME-01), three lines each.
+    assert_eq!(count(&ws, "decision_lines"), 12);
     assert_eq!(
         one_string(&ws, "SELECT typeof(date) FROM accounting_cases LIMIT 1"),
         "DATE"
@@ -2126,11 +2142,14 @@ fn s16_persist_run_preflight_refuses_every_structural_violation() {
             m(|_, _, p| p.snapshot_sha256 = "0".repeat(64)),
         ),
         (
-            "income counter reference",
+            "income counter key not derived from payment_date",
             m(|c, _, _| {
-                let i = c.iter().position(|x| x.source == "income").expect("income");
+                let i = c
+                    .iter()
+                    .position(|x| x.source == "income" && x.payment_date.is_some())
+                    .expect("paid income");
                 c[i].counter_source = Some("income".to_string());
-                c[i].counter_key = Some("betald".to_string());
+                c[i].counter_key = Some("obetald".to_string());
             }),
         ),
         (
@@ -2267,12 +2286,12 @@ fn t1_schema3_run_persists_three_lines_per_eligible_receipt() {
         ws.schema_version().expect("schema"),
         WORKSPACE_SCHEMA_DECISIONS
     );
-    assert_eq!(ev.lines, 6);
+    assert_eq!(ev.lines, 12);
     ws.close().expect("close");
     let mut ws = Workspace::open(db.path()).expect("reopen schema 3");
     let lines = ws.read_decision_lines().expect("lines");
     let cases = ws.read_cases().expect("cases");
-    assert_eq!(lines.len(), 6);
+    assert_eq!(lines.len(), 12);
     let bransle = cases
         .iter()
         .find(|c| c.subject.as_deref() == Some("Bränsle"))
@@ -2321,7 +2340,7 @@ fn t1_schema3_run_persists_three_lines_per_eligible_receipt() {
         Err(WorkspaceError::SnapshotMismatch { .. })
     ));
     assert_eq!(ws.logical_fingerprint().expect("fp"), fp);
-    assert_eq!(count(&ws, "decision_lines"), 6);
+    assert_eq!(count(&ws, "decision_lines"), 12);
 }
 
 // T2 — every schema-3 line corruption is Corrupt (or refused by the DDL) after reopen
@@ -2404,6 +2423,19 @@ fn t3_persist_run_line_preflight() {
             "Automatic without lines",
             m(move |c, _| c[0].status = "Automatic".to_string()),
         ),
+        // SIE-COMPLETE-01: a schema-3 run never persists a silent exclusion —
+        // the +0.30 rounding receipt as a zero-line Conditional (its pre-
+        // SIE-COMPLETE-01 shape) is refused.
+        (
+            "rounding receipt Conditional without lines",
+            m(move |c, _| {
+                let grus = c
+                    .iter()
+                    .position(|x| x.rounding == Some(Ore(30)))
+                    .expect("rounding receipt");
+                c[grus].status = "Conditional".to_string();
+            }),
+        ),
         (
             "lines on a Manual status",
             m(move |c, _| c[bransle as usize].status = "Manual".to_string()),
@@ -2463,4 +2495,67 @@ fn t4_digest_covers_lines() {
         matches!(&e, WorkspaceError::Corrupt(m) if m.contains("digest")),
         "{e}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SIE-INCOME-01 — I10 / I11: source/role/side and D-INC key invariants in
+// verify_run (schema 3), checked after a real run + SQL corruption.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn i10_i11_schema3_source_role_side_and_income_key_corruptions_are_corrupt() {
+    let lev = "(SELECT min(case_seq) FROM accounting_cases WHERE subject = 'leveransvirke')";
+    let bra = "(SELECT min(case_seq) FROM accounting_cases WHERE subject = 'Bränsle')";
+    let scenarios = [
+        ("i10-income-expense-role", format!("UPDATE decision_lines SET role = 'expense' WHERE line_no = 1 AND case_seq = {lev}"), "not allowed for source income"),
+        ("i10-income-on-debit", format!("UPDATE decision_lines SET debit_ore = credit_ore, credit_ore = 0 WHERE line_no = 1 AND case_seq = {lev}"), "must be on the credit side"),
+        ("i10-counter-on-credit", format!("UPDATE decision_lines SET credit_ore = debit_ore, debit_ore = 0 WHERE line_no = 0 AND case_seq = {lev}"), "must be on the debit side"),
+        ("i10-output-vat-on-debit", format!("UPDATE decision_lines SET debit_ore = credit_ore, credit_ore = 0 WHERE line_no = 2 AND case_seq = {lev}"), "must be on the credit side"),
+        ("i10-income-key", format!("UPDATE accounting_cases SET counter_key = 'obetald' WHERE case_seq = {lev}"), "derived from payment_date"),
+        ("i11-receipt-income-role", format!("UPDATE decision_lines SET role = 'income' WHERE line_no = 0 AND case_seq = {bra}"), "not allowed for source receipt"),
+        ("i11-receipt-rounding-role", format!("UPDATE decision_lines SET role = 'rounding' WHERE line_no = 0 AND case_seq = {bra}"), "not allowed for source receipt"),
+        ("i11-receipt-expense-on-credit", format!("UPDATE decision_lines SET credit_ore = debit_ore, debit_ore = 0 WHERE line_no = 0 AND case_seq = {bra}"), "must be on the debit side"),
+        ("i11-receipt-output-vat-role", format!("UPDATE decision_lines SET role = 'output_vat' WHERE line_no = 1 AND case_seq = {bra}"), "not allowed for source receipt"),
+    ];
+    for (name, statement, reason) in scenarios {
+        let db = TempDb::new(name);
+        let (ws, _) = run_testgarden(&db);
+        ws.verify_run().expect("clean run verifies");
+        sql(&ws, &statement);
+        let e = ws.verify_run().expect_err(name);
+        assert!(
+            matches!(&e, WorkspaceError::Corrupt(m) if m.contains(reason)),
+            "{name}: {e}"
+        );
+    }
+}
+
+// C6 — SIE-COMPLETE-01: a schema-3 run whose zero-line case is not Manual is
+// Corrupt (silent exclusion): the rounding receipt promoted to Conditional,
+// and a voucher whose lines were dropped.
+#[test]
+fn c6_schema3_non_manual_zero_line_case_is_corrupt() {
+    let grus = "(SELECT case_seq FROM accounting_cases WHERE rounding_ore = 30)";
+    let bra = "(SELECT min(case_seq) FROM accounting_cases WHERE subject = 'Bränsle')";
+    let scenarios = [
+        (
+            "c6-rounding-conditional",
+            format!("UPDATE accounting_cases SET status = 'Conditional' WHERE case_seq = {grus}"),
+        ),
+        (
+            "c6-voucher-lines-dropped",
+            format!("DELETE FROM decision_lines WHERE case_seq = {bra}"),
+        ),
+    ];
+    for (name, statement) in scenarios {
+        let db = TempDb::new(name);
+        let (ws, _) = run_testgarden(&db);
+        ws.verify_run().expect("clean run verifies");
+        sql(&ws, &statement);
+        let e = ws.verify_run().expect_err(name);
+        assert!(
+            matches!(&e, WorkspaceError::Corrupt(m) if m.contains("Conditional case without lines (silent exclusion)")),
+            "{name}: {e}"
+        );
+    }
 }
