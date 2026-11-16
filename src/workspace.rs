@@ -541,10 +541,14 @@ pub fn income_counter_key(payment_date: Option<NaiveDate>) -> &'static str {
 }
 
 /// SIE-INCOME-01: the (role, side) pairs a schema-3 line may carry per
-/// source. `true` = debit, `false` = credit. Receipt `rounding` stays
-/// unpermitted until E3 is implemented.
-const RECEIPT_LINE_ROLES: [(&str, bool); 3] =
-    [("expense", true), ("input_vat", true), ("counter", false)];
+/// source. `true` = debit, `false` = credit.
+/// E3 rounding may be debit or credit; the direction is checked separately.
+const RECEIPT_LINE_ROLES: [(&str, bool); 4] = [
+    ("expense", true),
+    ("input_vat", true),
+    ("rounding", true),
+    ("counter", false),
+];
 const INCOME_LINE_ROLES: [(&str, bool); 3] =
     [("counter", true), ("income", false), ("output_vat", false)];
 
@@ -2450,7 +2454,7 @@ fn check_run_rows(
                     l.role, cases[ci].source
                 )))
             }
-            Some((_, debit_side)) if *debit_side != (l.debit.0 > 0) => {
+            Some((_, debit_side)) if l.role != "rounding" && *debit_side != (l.debit.0 > 0) => {
                 return Err(corrupt(format!(
                     "line {idx}: role {} must be on the {} side for source {}",
                     l.role,

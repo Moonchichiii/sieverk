@@ -65,6 +65,9 @@ pub struct CounterRules {
     #[serde(rename = "_header")]
     pub header: Header,
     pub schema: String,
+    /// Optional, explicitly reviewed E3 rounding account. Never inferred.
+    #[serde(default)]
+    pub rounding_account: Option<String>,
     pub rows: Vec<CounterRule>,
 }
 
@@ -187,6 +190,14 @@ pub fn parse_counter_rules(bytes: &[u8]) -> Result<CounterRules, MasterdataError
     let counter: CounterRules = serde_json::from_slice(bytes)
         .map_err(|e| MasterdataError::new("", format!("invalid counter-account JSON: {e}")))?;
     schema_check(&counter.schema, COUNTER_SCHEMA)?;
+    if let Some(account) = &counter.rounding_account {
+        if !is_account_number(account) {
+            return Err(MasterdataError::new(
+                "rounding_account",
+                "must be four digits",
+            ));
+        }
+    }
     for r in &counter.rows {
         let path = format!("rows/{}/{}", r.source, r.key);
         if r.source != "receipt" && r.source != "income" {
@@ -378,6 +389,9 @@ pub fn validate_masterdata(md: &Masterdata) -> Result<(), MasterdataError> {
                 "vat_account is not in the chart",
             )); // V7
         }
+    }
+    if let Some(account) = &md.counter.rounding_account {
+        require_account(&md.chart, account, "counter.rounding_account", true)?;
     }
     for r in &md.counter.rows {
         let path = format!("counter/{}/{}", r.source, r.key);

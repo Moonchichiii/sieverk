@@ -2513,7 +2513,7 @@ fn i10_i11_schema3_source_role_side_and_income_key_corruptions_are_corrupt() {
         ("i10-output-vat-on-debit", format!("UPDATE decision_lines SET debit_ore = credit_ore, credit_ore = 0 WHERE line_no = 2 AND case_seq = {lev}"), "must be on the credit side"),
         ("i10-income-key", format!("UPDATE accounting_cases SET counter_key = 'obetald' WHERE case_seq = {lev}"), "derived from payment_date"),
         ("i11-receipt-income-role", format!("UPDATE decision_lines SET role = 'income' WHERE line_no = 0 AND case_seq = {bra}"), "not allowed for source receipt"),
-        ("i11-receipt-rounding-role", format!("UPDATE decision_lines SET role = 'rounding' WHERE line_no = 0 AND case_seq = {bra}"), "not allowed for source receipt"),
+        ("i11-receipt-rounding-role", format!("UPDATE decision_lines SET role = 'rounding' WHERE line_no = 0 AND case_seq = {bra}"), "decision digest mismatch"),
         ("i11-receipt-expense-on-credit", format!("UPDATE decision_lines SET credit_ore = debit_ore, debit_ore = 0 WHERE line_no = 0 AND case_seq = {bra}"), "must be on the debit side"),
         ("i11-receipt-output-vat-role", format!("UPDATE decision_lines SET role = 'output_vat' WHERE line_no = 1 AND case_seq = {bra}"), "not allowed for source receipt"),
     ];

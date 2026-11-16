@@ -598,8 +598,8 @@ fn h8_h16_engine_source_has_no_floats_and_no_invented_accounts() {
     assert_eq!(src.matches("role: LineRole::Counter").count(), 2);
     assert_eq!(
         src.matches("role: LineRole::Rounding").count(),
-        0,
-        "E3 is not implemented"
+        1,
+        "E3 must construct exactly one rounding line from verified masterdata"
     );
     // SIE-INCOME-01: income lines in exactly one place (income_lines).
     assert_eq!(src.matches("role: LineRole::Income").count(), 1);
