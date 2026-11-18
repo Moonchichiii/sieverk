@@ -1010,6 +1010,66 @@ fn single_positive_rate(rule: &VatRule, direction: &str) -> Result<i64, Skip> {
     }
 }
 
+/// E3: a verified masterdata account and nonzero signed rounding produce
+/// exactly one fourth row. Positive öre is debited, negative öre credited.
+fn e3_rounding_line(
+    case_seq: i32,
+    account: &str,
+    rounding: Ore,
+) -> Result<ProposedLine, EngineError> {
+    if rounding.0 == 0 {
+        return Err(EngineError::MoneyInvariant {
+            case_seq,
+            detail: "zero rounding does not require an E3 line".to_string(),
+        });
+    }
+    let (debit, credit) = if rounding.0 > 0 {
+        (rounding, Ore(0))
+    } else {
+        let opposite = rounding
+            .0
+            .checked_neg()
+            .ok_or_else(|| EngineError::MoneyInvariant {
+                case_seq,
+                detail: "rounding negation overflows i64".to_string(),
+            })?;
+        (Ore(0), Ore(opposite))
+    };
+    Ok(ProposedLine {
+        line_no: 3,
+        account: account.to_string(),
+        role: LineRole::Rounding,
+        debit,
+        credit,
+    })
+}
+
+#[cfg(test)]
+mod e3_rounding_unit_tests {
+    use super::*;
+
+    #[test]
+    fn e3_positive_rounding_is_debit() {
+        let line = e3_rounding_line(0, "9999", Ore(30)).expect("rounding line");
+        assert_eq!(line.line_no, 3);
+        assert_eq!(line.account, "9999");
+        assert_eq!(line.role, LineRole::Rounding);
+        assert_eq!((line.debit.0, line.credit.0), (30, 0));
+    }
+
+    #[test]
+    fn e3_negative_rounding_is_credit() {
+        let line = e3_rounding_line(0, "9999", Ore(-20)).expect("rounding line");
+        assert_eq!((line.debit.0, line.credit.0), (0, 20));
+    }
+
+    #[test]
+    fn e3_refuses_zero_or_i64_min() {
+        assert!(e3_rounding_line(0, "9999", Ore(0)).is_err());
+        assert!(e3_rounding_line(0, "9999", Ore(i64::MIN)).is_err());
+    }
+}
+
 /// The three-line construction for one eligible receipt, or the Skip that
 /// keeps it fail-closed. Structural failures are `EngineError`s.
 fn receipt_lines(
@@ -1080,11 +1140,16 @@ fn receipt_lines(
             },
             Err(_) => return Ok(Err(Skip::AlreadyManual)),
         };
-    // §2.6 rounding gate (E3 deferred). SIE-COMPLETE-01: explicit, Manual —
-    // the masterdata names no rounding account, so none is invented.
-    if rounding.0 != 0 {
-        return Ok(Err(Skip::NotImplemented(Exclusion::RoundingNotImplemented)));
-    }
+    // E3: never invent an account. An unconfigured rounding rule still
+    // produces an explicit Manual exclusion, not a truncated voucher.
+    let rounding_account = if rounding.0 != 0 {
+        match masterdata.counter.rounding_account.as_deref() {
+            Some(account) => Some(account),
+            None => return Ok(Err(Skip::NotImplemented(Exclusion::RoundingNotImplemented))),
+        }
+    } else {
+        None
+    };
     // §3 E1 preconditions and Formula B. Credit notes are not implemented —
     // never silent (same rule as income D-NEG).
     if net.0 <= 0 || total.0 <= 0 || vat.0 < 0 {
@@ -1120,21 +1185,21 @@ fn receipt_lines(
     ] {
         proposal_guard(seq, account, status, entity, masterdata)?;
     }
-    // §4 E2: exactly three lines; balance re-checked in checked i64.
-    let sum = net
-        .0
-        .checked_add(vat.0)
-        .ok_or_else(|| EngineError::MoneyInvariant {
-            case_seq: seq,
-            detail: "net + vat overflows i64".to_string(),
-        })?;
+    if let Some(account) = rounding_account {
+        proposal_guard(seq, account, status, entity, masterdata)?;
+    }
+    // E2/E3: three lines without rounding, four with rounding.
+    let sum = checked_sum(seq, &[net.0, vat.0, rounding.0], "net + vat + rounding")?;
     if sum != total.0 {
         return Err(EngineError::MoneyInvariant {
             case_seq: seq,
-            detail: format!("net {} + vat {} != total {} (öre)", net.0, vat.0, total.0),
+            detail: format!(
+                "net {} + vat {} + rounding {} != total {} (öre)",
+                net.0, vat.0, rounding.0, total.0
+            ),
         });
     }
-    Ok(Ok(vec![
+    let mut lines = vec![
         ProposedLine {
             line_no: 0,
             account: expense_account.to_string(),
@@ -1156,7 +1221,11 @@ fn receipt_lines(
             debit: Ore(0),
             credit: *total,
         },
-    ]))
+    ];
+    if let Some(account) = rounding_account {
+        lines.push(e3_rounding_line(seq, account, *rounding)?);
+    }
+    Ok(Ok(lines))
 }
 
 /// SIE-INCOME-01: the three-line construction for one eligible income

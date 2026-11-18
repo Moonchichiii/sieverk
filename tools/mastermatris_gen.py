@@ -398,6 +398,11 @@ def validate(
         vat_rules[rid] = r
     _check_review(rep, "Momsregler", _live(sheets["Momsregler"]), "momsregel_id")
 
+    # E3: optional rounding account must be explicitly present in the workbook.
+    rounding_account = next((r["värde"] for r in sheets["README"] if r["nyckel"] == "rounding_account"), "")
+    if rounding_account:
+        account_ok(rounding_account, "README/rounding_account", "V3", proposable_needed=True)
+
     # Motkonton (V3, V10)
     counter_rows = _live(sheets["Motkonton"])
     for r in counter_rows:
@@ -672,6 +677,7 @@ def emit(sheets: dict[str, list[dict[str, str]]], model: dict[str, Any], taxonom
     counter = {
         "_header": header,
         "schema": "sieverk-counter/1",
+        **({"rounding_account": meta["rounding_account"]} if meta.get("rounding_account") else {}),
         "rows": sorted(
             (
                 {

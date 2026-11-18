@@ -26,6 +26,9 @@ pub struct VerifiedExportContext {
     identifier_kind: IdentifierKind,
     business_identifier: String,
     fiscal_period: FiscalPeriod,
+    /// SIE-DATE-01: the bookkeeping method exactly as sent, or `None` when the
+    /// snapshot has no accounting profile. Decides the booking day only.
+    bookkeeping_method: Option<String>,
     snapshot_sha256: String,
 }
 
@@ -70,6 +73,11 @@ impl VerifiedExportContext {
             identifier_kind: identity.identifier_kind,
             business_identifier: identity.business_identifier.clone(),
             fiscal_period,
+            bookkeeping_method: snapshot
+                .entity
+                .accounting_profile
+                .as_ref()
+                .map(|p| p.bookkeeping_method.clone()),
             snapshot_sha256: digest.to_string(),
         })
     }
@@ -95,6 +103,12 @@ impl VerifiedExportContext {
     /// The fiscal period exactly as sent (for `#RAR 0`).
     pub fn fiscal_period(&self) -> FiscalPeriod {
         self.fiscal_period
+    }
+
+    /// The bookkeeping method exactly as sent (`cash`, `invoice`, `unknown`),
+    /// `None` without an accounting profile. Used only for the booking day.
+    pub fn bookkeeping_method(&self) -> Option<&str> {
+        self.bookkeeping_method.as_deref()
     }
 
     pub fn snapshot_sha256(&self) -> &str {

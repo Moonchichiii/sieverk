@@ -16,7 +16,9 @@
 //! `#FNAMN` and `#RAR 0`, all taken only from a `VerifiedExportContext`
 //! (never `display_name`, a legacy `org_number`, CLI values or `income_year`);
 //! no `#KPTYP`, no `#KSUMMA`;
-//! `#VER "" "<n>" <date> "<subject>"` (CASE B, SK-SIE-BRIDGE-04 Addendum 4):
+//! `#VER "" "<n>" <date> "<subject>"` (CASE B, SK-SIE-BRIDGE-04 Addendum 4);
+//! `<date>` is the booking day (`booking_date`, SIE-DATE-01): the payment date
+//! for a paid income under the cash method, otherwise the case's own date:
 //! the voucher series is always blank and the writer owns the number — `n` is
 //! a plain base-10 ordinal `1..N` over the vouchers actually emitted, in
 //! emission (`case_seq`) order, file-local and never derived from ids, keys,
@@ -257,6 +259,27 @@ fn sie_amount(signed_ore: i64) -> String {
     format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
+/// SIE-DATE-01: the day a voucher is booked.
+///
+/// Under the cash method (`bookkeeping_method = "cash"`) an income that has a
+/// payment date is booked on the day it was paid; the snapshot's `date` (the
+/// day of the invoice or settlement) and `payment_date` are both kept as they
+/// are and only this derived day differs. Every other case is booked on its
+/// own `date`: receipts (which carry no payment date), unpaid income (which
+/// never reaches the writer: no `obetald` counter row ⇒ Manual), and every
+/// case under the invoicing method or an unknown method.
+///
+/// The fiscal-period check uses this same day, so a payment in another
+/// financial year stops the export instead of moving the voucher: under the
+/// cash method such an income is a year-end receivable, which is not
+/// implemented and is never guessed.
+pub fn booking_date(case: &PersistedCase, bookkeeping_method: Option<&str>) -> NaiveDate {
+    match (bookkeeping_method, case.source.as_str(), case.payment_date) {
+        (Some("cash"), "income", Some(paid)) => paid,
+        _ => case.date,
+    }
+}
+
 fn sie_date(d: NaiveDate) -> String {
     d.format("%Y%m%d").to_string()
 }
@@ -408,12 +431,13 @@ pub fn write_sie4i(
     let vouchers = eligible_vouchers(&cases, &lines)?;
 
     // 8. Every exported voucher lies inside the fiscal period — never repaired,
-    //    never dropped.
+    //    never dropped. The day tested is the booking day (SIE-DATE-01).
+    let method = context.bookkeeping_method();
     let period = context.fiscal_period();
-    if let Some(v) = vouchers
-        .iter()
-        .find(|v| v.case.date < period.start || v.case.date > period.end)
-    {
+    if let Some(v) = vouchers.iter().find(|v| {
+        let day = booking_date(v.case, method);
+        day < period.start || day > period.end
+    }) {
         return Err(SieWriteError::VoucherOutsideFiscalPeriod {
             case_seq: v.case.case_seq,
         });
@@ -508,7 +532,10 @@ pub fn write_sie4i(
         }
         let field = format!("#VER case {seq}");
         // CASE B: blank series, writer-assigned number.
-        let mut ver = format!("#VER \"\" \"{ordinal}\" {}", sie_date(v.case.date));
+        let mut ver = format!(
+            "#VER \"\" \"{ordinal}\" {}",
+            sie_date(booking_date(v.case, method))
+        );
         if let Some(subject) = &v.case.subject {
             ver.push(' ');
             ver.push_str(&quoted(&field, subject)?);

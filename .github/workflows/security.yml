@@ -19,6 +19,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2
+
+      # Scheduled runs: audit-check reports through the Issues API (it opens an
+      # issue per advisory). This is the only event on which the action is used.
+      - if: github.event_name == 'schedule'
+        uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push and manual runs: audit-check would report through the Checks API,
+      # and its update of the check run fails with 404 (SIE-SEC-CHECK-01). Run
+      # cargo-audit directly instead, as the CI workflow does. Its exit code is
+      # the result: a vulnerability fails the job, warnings are printed in the
+      # log. No --ignore, no continue-on-error.
+      - if: github.event_name != 'schedule'
+        uses: dtolnay/rust-toolchain@stable
+      - if: github.event_name != 'schedule'
+        uses: Swatinem/rust-cache@v2
+      - if: github.event_name != 'schedule'
+        run: cargo install cargo-audit --locked
+      - if: github.event_name != 'schedule'
+        run: cargo audit --file Cargo.lock
