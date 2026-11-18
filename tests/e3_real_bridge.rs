@@ -58,7 +58,7 @@ fn exercise(rounding: &str, total: &str, expected: &str, out_var: Option<&str>) 
         }
     ));
     assert!(!db.exists(), "fresh isolated test database");
-    let result = (|| {
+    {
         let mut ws = Workspace::create(&db).expect("create DuckDB");
         let raw = serde_json::to_vec(&snapshot).expect("synthetic JSON");
         let ingested = ws.ingest_snapshot(&raw).expect("snapshot ingest");
@@ -69,7 +69,7 @@ fn exercise(rounding: &str, total: &str, expected: &str, out_var: Option<&str>) 
             &md,
             &context,
             &ExportMetadata {
-                generated_on: NaiveDate::from_ymd_opt(2026, 11, 16).unwrap(),
+                generated_on: NaiveDate::from_ymd_opt(2026, 11, 16).expect("date"),
                 program: ProgramId {
                     name: "SIEverk".to_string(),
                     version: "0.4.0".to_string(),
@@ -114,11 +114,10 @@ fn exercise(rounding: &str, total: &str, expected: &str, out_var: Option<&str>) 
                 fs::write(&dest, &result.bytes).expect("write synthetic SIE evidence");
             }
         }
-    })();
+    }
     let _ = fs::remove_file(&db);
     let _ = fs::remove_file(db.with_extension("duckdb.wal"));
     let _ = fs::remove_dir(&output_dir);
-    result
 }
 
 #[test]
