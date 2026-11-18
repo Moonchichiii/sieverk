@@ -1050,7 +1050,7 @@ mod e3_rounding_unit_tests {
 
     #[test]
     fn e3_positive_rounding_is_debit() {
-        let line = e3_rounding_line(0, "9999", Ore(30)).unwrap();
+        let line = e3_rounding_line(0, "9999", Ore(30)).expect("rounding line");
         assert_eq!(line.line_no, 3);
         assert_eq!(line.account, "9999");
         assert_eq!(line.role, LineRole::Rounding);
@@ -1059,7 +1059,7 @@ mod e3_rounding_unit_tests {
 
     #[test]
     fn e3_negative_rounding_is_credit() {
-        let line = e3_rounding_line(0, "9999", Ore(-20)).unwrap();
+        let line = e3_rounding_line(0, "9999", Ore(-20)).expect("rounding line");
         assert_eq!((line.debit.0, line.credit.0), (0, 20));
     }
 

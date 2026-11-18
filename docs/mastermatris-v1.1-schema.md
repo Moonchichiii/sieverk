@@ -206,7 +206,7 @@ och får kodas i SV-03 först som `IMPLEMENTABLE`. Statusen förs i den här tab
 | E2 | `vat_registered ≠ yes` ⇒ ingen ingående moms bokförs (bruttot på kostnadskontot), Conditional med fråga | PROPOSED |
 | E3 | Öresutjämning ⇒ 3740 med tecken (kontot måste finnas i `Konton`; regeln är motorns) | PROPOSED |
 | E4 | `bookkeeping_method=unknown` eller `payment_method=unknown` ⇒ motkontoradens `automation` överstyrs till Manual | PROPOSED |
-| E5 | Verifikationsdatum: kvittodatum (`cash`, betalt) / `payment_date` (inkomst) | PROPOSED — beror på GATE-0 §13 |
+| E5 | Verifikationsdatum: kvittodatum (`cash`, betalt) / `payment_date` (inkomst) | DELVIS IMPLEMENTERAD (SIE-DATE-01): en betald inkomst bokförs på `payment_date` när snapshotens `bookkeeping_method` är `cash`; i övrigt på postens `date`. Kvitton har inget betaldatum och bokförs på kvittodatum. Betaldatum utanför räkenskapsperioden stoppar exporten (`VoucherOutsideFiscalPeriod`); bokslutsfordran är inte implementerad. Se `sie_writer::booking_date`. |
 | E6 | `supplier_credit` under kontantmetoden: bokförs vid registrering eller inte | PROPOSED — beror på GATE-0 §13 |
 
 Formatmekanik är **inte** redovisningsregler och kräver ingen konsultgranskning: balans per
