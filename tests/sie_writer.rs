@@ -24,7 +24,9 @@ use sieverk::engine::run_engine;
 use sieverk::export_context::VerifiedExportContext;
 use sieverk::money::Ore;
 use sieverk::ruleset::{load_masterdata, Masterdata};
-use sieverk::sie_writer::{write_sie4i, ExportMetadata, ProgramId, SieExport, SieWriteError};
+use sieverk::sie_writer::{
+    booking_date, write_sie4i, ExportMetadata, ProgramId, SieExport, SieWriteError,
+};
 use sieverk::validator::{validate, Code};
 use sieverk::workspace::{Workspace, WorkspaceError, WORKSPACE_SCHEMA_DECISIONS};
 use sieverk::{accounts, decode_sie_bytes, metadata, vouchers};
@@ -36,15 +38,19 @@ const HISTORICAL_BYTES: usize = 441;
 const VNEXT_SHA256: &str = "3c225ff8332d2942d6b9115c19ab8fec0b47de53f0a0ef8fad404b63259bdba0";
 const VNEXT_BYTES: usize = 489;
 /// SIE-INCOME-01 golden: the live Testgården export with income vouchers.
+/// SIE-DATE-01 changed it deliberately: the fixture uses the cash method, so
+/// its two paid leveransvirke entries are booked on their payment dates
+/// (2026-05-05 and 2026-07-22), not on the settlement dates (2026-04-20 and
+/// 2026-07-08). Same size; the previous value was 6a257db3…f7395.
 /// Hash locked from the real writer bytes; never edited to make a test green.
-const INCOME01_SHA256: &str = "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
+const INCOME01_SHA256: &str = "97a4447b2663d0df482ca7861d4508b8f21e36bed17786fd045dd18b4fc92440";
 const INCOME01_BYTES: usize = 789;
 /// The two income vouchers and the two accounts they add, in CP437 bytes.
 const INCOME_KONTO_2610: &[u8] = b"#KONTO 2610 \"Utg\x86ende moms\"\r\n";
 const INCOME_KONTO_3420: &[u8] = b"#KONTO 3420 \"Leveransvirke\"\r\n";
-const INCOME_VER_3: &str = "#VER \"\" \"3\" 20260420 \"leveransvirke\"\r\n{\r\n\
+const INCOME_VER_3: &str = "#VER \"\" \"3\" 20260505 \"leveransvirke\"\r\n{\r\n\
 #TRANS 1930 {} 120000.00\r\n#TRANS 3420 {} -96000.00\r\n#TRANS 2610 {} -24000.00\r\n}\r\n";
-const INCOME_VER_4: &str = "#VER \"\" \"4\" 20260708 \"leveransvirke\"\r\n{\r\n\
+const INCOME_VER_4: &str = "#VER \"\" \"4\" 20260722 \"leveransvirke\"\r\n{\r\n\
 #TRANS 1930 {} 47500.00\r\n#TRANS 3420 {} -38000.00\r\n#TRANS 2610 {} -9500.00\r\n}\r\n";
 /// BRIDGE-04 pre-D3 compatibility vector (blank series and number): evidence.
 const PRE_D3_SHA256: &str = "b977601f45b5a5495dead24849393f19626fa17d0d9c6b7f50d64d33e418dd0b";
@@ -380,7 +386,7 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
             third.number.as_str(),
             third.date.as_str()
         ),
-        ("", "3", "20260420")
+        ("", "3", "20260505")
     );
     assert_eq!(third.text.as_deref(), Some("leveransvirke"));
     assert_eq!(
@@ -397,7 +403,7 @@ fn w3_roundtrip_through_existing_parser_and_validator() {
     );
     assert_eq!(
         (v.vouchers[3].number.as_str(), v.vouchers[3].date.as_str()),
-        ("4", "20260708")
+        ("4", "20260722")
     );
     let first = &v.vouchers[0];
     assert_eq!(
@@ -566,8 +572,8 @@ fn w4b_numbering_skips_manual_and_zero_line_cases() {
         vec![
             ("", "1", "20260820"),
             ("", "2", "20260602"),
-            ("", "3", "20260420"),
-            ("", "4", "20260708")
+            ("", "3", "20260505"),
+            ("", "4", "20260722")
         ]
     );
     assert!(!text.contains("Grus och material"));
@@ -940,4 +946,162 @@ fn w13b_blank_series_and_contiguous_numbers_on_every_voucher() {
     assert_eq!(text.matches("#TRANS ").count(), 12);
     assert_eq!(text.matches(VER_BLANK).count(), 0);
     assert_eq!(out.sha256, INCOME01_SHA256);
+}
+
+// ---------------------------------------------------------------------------
+// SIE-DATE-01 — the booking day of a paid income under the cash method
+// ---------------------------------------------------------------------------
+
+/// (number, date) of every voucher in an export.
+fn voucher_days(out: &SieExport) -> Vec<(String, String)> {
+    let text = decode_sie_bytes(out.bytes.clone());
+    vouchers::parse_vouchers(&text)
+        .vouchers
+        .iter()
+        .map(|v| (v.number.clone(), v.date.clone()))
+        .collect()
+}
+
+fn with_method(method: Option<&str>) -> Vec<u8> {
+    snapshot_with(|v| match method {
+        Some(m) => v["entity"]["accounting_profile"]["bookkeeping_method"] = m.into(),
+        None => v["entity"]["accounting_profile"] = serde_json::Value::Null,
+    })
+}
+
+#[test]
+fn d1_cash_method_books_a_paid_income_on_its_payment_date() {
+    // The fixture: cash method; leveransvirke settled 2026-04-20 and paid
+    // 2026-05-05, settled 2026-07-08 and paid 2026-07-22. Receipts keep their date.
+    let db = TempDb::new("d1");
+    let md = masterdata();
+    let (ws, ctx) = run_workspace(&db, &md);
+    assert_eq!(ctx.bookkeeping_method(), Some("cash"));
+    let out = export(&ws, &md, &ctx);
+    assert_eq!(
+        voucher_days(&out),
+        vec![
+            ("1".to_string(), "20260820".to_string()),
+            ("2".to_string(), "20260602".to_string()),
+            ("3".to_string(), "20260505".to_string()),
+            ("4".to_string(), "20260722".to_string()),
+        ]
+    );
+    // The source dates are untouched in the workspace: only the derived day differs.
+    let cases = ws.read_cases().expect("cases");
+    let paid: Vec<_> = cases
+        .iter()
+        .filter(|c| c.source == "income" && c.status != "Manual")
+        .map(|c| (c.date.to_string(), c.payment_date.map(|d| d.to_string())))
+        .collect();
+    assert_eq!(
+        paid,
+        vec![
+            ("2026-04-20".to_string(), Some("2026-05-05".to_string())),
+            ("2026-07-08".to_string(), Some("2026-07-22".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn d2_only_the_cash_method_moves_the_booking_day() {
+    // Invoicing method, an unknown method and no profile at all: an income that
+    // reaches the file is booked on its own date. (Which cases reach the file may
+    // differ by method, because counter rows can be method-specific.)
+    let md = masterdata();
+    for (tag, method) in [
+        ("d2-invoice", Some("invoice")),
+        ("d2-unknown", Some("unknown")),
+        ("d2-none", None),
+    ] {
+        let db = TempDb::new(tag);
+        let (ws, ctx) = run_raw(&db, &with_method(method), &md);
+        assert_eq!(ctx.bookkeeping_method(), method, "{tag}");
+        let out = export(&ws, &md, &ctx);
+        let days: Vec<String> = voucher_days(&out).into_iter().map(|(_, d)| d).collect();
+        for case in ws.read_cases().expect("cases") {
+            if case.source == "income" && case.status != "Manual" {
+                let own = case.date.format("%Y%m%d").to_string();
+                let paid = case
+                    .payment_date
+                    .expect("paid")
+                    .format("%Y%m%d")
+                    .to_string();
+                assert!(days.contains(&own), "{tag}: booked on its own date {own}");
+                assert!(
+                    !days.contains(&paid),
+                    "{tag}: not on the payment date {paid}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn d3_an_unpaid_income_is_never_given_a_date_or_a_voucher() {
+    let db = TempDb::new("d3");
+    let md = masterdata();
+    let (ws, ctx) = run_workspace(&db, &md);
+    let cases = ws.read_cases().expect("cases");
+    let unpaid: Vec<_> = cases
+        .iter()
+        .filter(|c| c.source == "income" && c.payment_date.is_none())
+        .collect();
+    assert_eq!(unpaid.len(), 1, "the fixture has one unpaid income");
+    assert_eq!(unpaid[0].status, "Manual");
+    assert_eq!(booking_date(unpaid[0], Some("cash")), unpaid[0].date);
+    let out = export(&ws, &md, &ctx);
+    assert_eq!(voucher_days(&out).len(), 4, "still four vouchers");
+}
+
+#[test]
+fn d4_a_payment_in_another_financial_year_stops_the_export() {
+    // Settled in the period, paid after it. Under the cash method that is a
+    // year-end receivable, which is not implemented: the export is refused, the
+    // voucher is neither moved to the wrong year nor silently dropped.
+    let md = masterdata();
+    for (tag, paid) in [("d4-after", "2027-01-10"), ("d4-before", "2025-12-30")] {
+        let raw = snapshot_with(|v| {
+            for e in v["income_entries"].as_array_mut().expect("incomes") {
+                if e["income_type"] == "leveransvirke" && e["date"] == "2026-07-08" {
+                    e["payment_date"] = paid.into();
+                }
+            }
+        });
+        let db = TempDb::new(tag);
+        let (ws, ctx) = run_raw(&db, &raw, &md);
+        let err = write_sie4i(&ws, &md, &ctx, &meta()).expect_err("refused");
+        assert!(
+            matches!(err, SieWriteError::VoucherOutsideFiscalPeriod { .. }),
+            "{tag}: {err}"
+        );
+    }
+    // The same payment date is harmless under the invoicing method: the income
+    // is booked on its own date, inside the period.
+    let raw = snapshot_with(|v| {
+        v["entity"]["accounting_profile"]["bookkeeping_method"] = "invoice".into();
+        for e in v["income_entries"].as_array_mut().expect("incomes") {
+            if e["income_type"] == "leveransvirke" && e["date"] == "2026-07-08" {
+                e["payment_date"] = "2027-01-10".into();
+            }
+        }
+    });
+    let db = TempDb::new("d4-invoice");
+    let (ws, ctx) = run_raw(&db, &raw, &md);
+    write_sie4i(&ws, &md, &ctx, &meta()).expect("invoice method exports");
+}
+
+#[test]
+fn d5_receipts_always_keep_their_own_date() {
+    let db = TempDb::new("d5");
+    let md = masterdata();
+    let (ws, _ctx) = run_workspace(&db, &md);
+    for case in ws.read_cases().expect("cases") {
+        if case.source == "receipt" {
+            assert!(case.payment_date.is_none());
+            for method in [Some("cash"), Some("invoice"), None] {
+                assert_eq!(booking_date(&case, method), case.date);
+            }
+        }
+    }
 }

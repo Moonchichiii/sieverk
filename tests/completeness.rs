@@ -24,7 +24,7 @@ const TESTGARDEN: &str = "fixtures/snapshots/testgarden-2026-1.2.json";
 const SYNTHETIC_ROOT: &str = "fixtures/masterdata/synthetic/generated";
 /// SIE-INCOME-01 golden — unchanged by SIE-COMPLETE-01 (the rounding receipt
 /// never had a voucher; it now has an explicit reason instead of none).
-const INCOME01_SHA256: &str = "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
+const INCOME01_SHA256: &str = "97a4447b2663d0df482ca7861d4508b8f21e36bed17786fd045dd18b4fc92440";
 
 fn repo(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)

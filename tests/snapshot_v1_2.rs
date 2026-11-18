@@ -508,11 +508,11 @@ fn vnext_minus_identity_lines_is_the_historical_441_byte_file() {
         ("#KONTO 2610 \"Utg\u{86}ende moms\"\r\n", ""),
         ("#KONTO 3420 \"Leveransvirke\"\r\n", ""),
         (
-            "#VER \"\" \"3\" 20260420 \"leveransvirke\"\r\n{\r\n#TRANS 1930 {} 120000.00\r\n#TRANS 3420 {} -96000.00\r\n#TRANS 2610 {} -24000.00\r\n}\r\n",
+            "#VER \"\" \"3\" 20260505 \"leveransvirke\"\r\n{\r\n#TRANS 1930 {} 120000.00\r\n#TRANS 3420 {} -96000.00\r\n#TRANS 2610 {} -24000.00\r\n}\r\n",
             "",
         ),
         (
-            "#VER \"\" \"4\" 20260708 \"leveransvirke\"\r\n{\r\n#TRANS 1930 {} 47500.00\r\n#TRANS 3420 {} -38000.00\r\n#TRANS 2610 {} -9500.00\r\n}\r\n",
+            "#VER \"\" \"4\" 20260722 \"leveransvirke\"\r\n{\r\n#TRANS 1930 {} 47500.00\r\n#TRANS 3420 {} -38000.00\r\n#TRANS 2610 {} -9500.00\r\n}\r\n",
             "",
         ),
     ] {

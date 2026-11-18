@@ -19,7 +19,7 @@ const MINIMAL_11: &str = "fixtures/snapshots/minimal-1.1.json";
 /// Testgården export since SIE-INCOME-01 (CASE B + two income vouchers; the
 /// CASE B file itself stays evidence, see tests/sie_writer.rs W1c).
 const TESTGARDEN_SI_SHA256: &str =
-    "6a257db30765f6f9ece895ab0c700f89d7d47d78e4a397f953f5e41d766f7395";
+    "97a4447b2663d0df482ca7861d4508b8f21e36bed17786fd045dd18b4fc92440";
 
 /// Never printed, in any command, on any outcome.
 const SECRETS: [&str; 12] = [
